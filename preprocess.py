@@ -6,16 +6,23 @@ from typing import List, Dict, Optional
 USE_LEMMATIZATION = True
 
 if USE_LEMMATIZATION:
-    import nltk
-    from nltk.stem import WordNetLemmatizer
-    
     try:
-        nltk.data.find("corpora/wordnet")
-    except LookupError:
-        nltk.download("wordnet")
-        nltk.download("omw-1.4")
-    
-    lemmatizer = WordNetLemmatizer()
+        import nltk
+        from nltk.stem import WordNetLemmatizer
+        
+        try:
+            nltk.data.find("corpora/wordnet")
+        except LookupError:
+            nltk.download("wordnet")
+            nltk.download("omw-1.4")
+        
+        lemmatizer = WordNetLemmatizer()
+        
+        nltk_available = True
+    except ImportError:
+        # NLTK not available - lemmatization will be skipped
+        lemmatizer = None
+        nltk_available = False
 
 
 # -------------------------------------------------
@@ -103,7 +110,7 @@ def normalize_text(text: str,
 def tokenize(text: str) -> List[str]:
     tokens = text.split()
     
-    if USE_LEMMATIZATION:
+    if USE_LEMMATIZATION and nltk_available:
         tokens = [lemmatizer.lemmatize(token) for token in tokens]
     
     return tokens
