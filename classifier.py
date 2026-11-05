@@ -42,7 +42,9 @@ MATCHED_WINDOW_LIMIT = 8
 DEFAULT_MODEL = "local-classifier"
 DEFAULT_TIMEOUT = 180  # this model can take a while to think
 REVIEW_CONFIDENCE_FLOOR = 0.75
-COVERAGE_FOR_FULL_QUOTATION = 0.60
+COVERAGE_FOR_FULL_QUOTATION = 0.60  # same floor the rubric uses
+WHOLE_PASSAGE_SHARE = 0.60
+NO_REPRODUCTION_SHARE = 0.10
 CONTRADICTION_SIMILARITY = 0.85
 
 SYSTEM_PROMPT = """You classify the relationship between two scriptural passages.
@@ -138,7 +140,8 @@ class ClassifierResponseError(ValueError):
     """The model returned something that cannot be used as a classification."""
 
 
-def build_case(query, source, matched_windows, retrieval=None, context_radius=2):
+def build_case(query, source, matched_windows, retrieval=None, context_radius=2,
+               reproduction=None):
     """Assemble the classifier input, keeping matched evidence and context apart.
 
     query / source: {"ref": "Mosiah 12", "span": "21-24", "text": "..."}
@@ -158,6 +161,7 @@ def build_case(query, source, matched_windows, retrieval=None, context_radius=2)
         "matched_total": len(ordered),
         "matched_truncated": len(ordered) > len(kept),
         "retrieval": dict(retrieval or {}),
+        "reproduction": dict(reproduction or {}),
         "context_radius": context_radius,
     }
     case["query"].setdefault("context", "")
@@ -206,6 +210,21 @@ def render_prompt(case):
 
     if source.get("context"):
         sections += ["", "SURROUNDING CONTEXT OF B (not matched evidence)", source["context"].strip()]
+
+    reproduction = case.get("reproduction") or {}
+    if reproduction.get("reproduced_share") is not None:
+        sections += [
+            "",
+            "MEASURED REPRODUCTION (computed from the text, not a model judgement)",
+            f"  source verses reproduced: {reproduction.get('reproduced_count')} of "
+            f"{reproduction.get('verses_in_source')} "
+            f"({reproduction['reproduced_share']:.0%} of the source passage)",
+            f"  longest run of consecutive reproduced verses: {reproduction.get('longest_run')}",
+            f"  share of the query's wording drawn from the source: "
+            f"{reproduction.get('query_share', 0.0):.0%}",
+            "  Apply the extent test to this measurement: most of the passage reproduced "
+            "means quotation; a run inside a longer passage means partial_quotation.",
+        ]
 
     total = case.get("matched_total", len(case["matched_windows"]))
     heading = "MATCHED EVIDENCE (retrieval's window pairs"
@@ -324,20 +343,42 @@ def apply_extent_guard(result, case):
     much of the cited source the match covers, that measurement decides - downwards
     only. The guard never promotes a label.
     """
-    coverage = case.get("retrieval", {}).get("coverage")
-    result["coverage_of_source"] = coverage
+    reproduction = case.get("reproduction") or {}
+    share = reproduction.get("reproduced_share")
+    result["coverage_of_source"] = case.get("retrieval", {}).get("coverage")
+    result["reproduced_share"] = share
+    result["guard_applied"] = ""
 
-    if (result["relationship"] == "quotation" and coverage is not None
-            and coverage < COVERAGE_FOR_FULL_QUOTATION):
+    if share is None:
+        return result
+
+    if result["relationship"] == "quotation" and share < NO_REPRODUCTION_SHARE:
+        # claiming a quotation where almost nothing is reproduced is the worst error
+        # in this taxonomy: the wording is not there at all
+        result["guard_original_relationship"] = result["relationship"]
+        result["relationship"] = "paraphrase"
+        result["guard_applied"] = "extent-no-reproduction"
+        result["guard_note"] = (
+            f"measurement reproduces only {share:.0%} of the source passage, so a "
+            f"quotation cannot be supported; downgraded to paraphrase for review"
+        )
+        result["model_needs_review"] = True
+
+    elif result["relationship"] == "quotation" and share < COVERAGE_FOR_FULL_QUOTATION:
         result["guard_original_relationship"] = result["relationship"]
         result["relationship"] = "partial_quotation"
         result["guard_applied"] = "extent"
         result["guard_note"] = (
-            f"matched evidence covers {coverage:.0%} of the cited source passage, under "
-            f"the {COVERAGE_FOR_FULL_QUOTATION:.0%} floor for calling the passage fully quoted"
+            f"measurement reproduces {share:.0%} of the source passage, under the "
+            f"{COVERAGE_FOR_FULL_QUOTATION:.0%} needed for a whole-passage quotation"
         )
-    else:
-        result["guard_applied"] = ""
+    elif result["relationship"] == "partial_quotation" and share >= WHOLE_PASSAGE_SHARE:
+        # never promote automatically, but say what the measurement saw
+        result["guard_applied"] = "observation"
+        result["guard_note"] = (
+            f"measurement reproduces {share:.0%} of the source passage; the rubric's "
+            f"extent reading would be quotation - left for review, not promoted"
+        )
 
     return result
 
@@ -361,6 +402,8 @@ def apply_review_policy(result, case):
             )
     if result["relationship"] in DEPENDENT and not (result["query_span"] or result["source_span"]):
         reasons.append("dependent relationship claimed without verse spans")
+    if result.get("guard_applied") and result.get("guard_note"):
+        reasons.append(f"guard: {result['guard_note']}")
 
     result["needs_review"] = bool(reasons)
     result["review_reasons"] = reasons
@@ -382,6 +425,7 @@ class RelationshipClassifier:
         result["model"] = self.model
         result["rubric_version"] = RUBRIC_VERSION
         result["matched_windows"] = case["matched_windows"]
+        result["reproduction"] = case.get("reproduction", {})
         result["matched_total"] = case.get("matched_total", len(case["matched_windows"]))
         result["matched_truncated"] = case.get("matched_truncated", False)
         result["evidence_source"] = "matched"

@@ -190,6 +190,55 @@ pairs keep their previous label in `label_history` with the reason, and a pair m
 a `secondary_relationship` when two relationships both apply (Mosiah 15 and Alma 42 are
 interpretations with an embedded partial quotation).
 
+## Measuring extent (deterministic, no model calls)
+
+The rubric's extent rule needs a number, and embeddings cannot supply one: matched
+windows spread across a chapter, so chapter-level coverage saturates at 1.00 even when
+three verses are quoted. `coverage.py` measures reproduction from the wording instead.
+For a source chapter it asks, verse by verse, what share of that verse's four-word
+sequences also occur in the query, then reports:
+
+    reproduced_share   share of the source chapter's verses that are reproduced
+    longest_run        longest run of consecutive reproduced verses
+    query_share        share of the query's wording that comes from the source
+    extent reading     quotation / partial_quotation / no reproduction, with the reason
+
+Measured over the labelled set (`coverage_report.py`):
+
+    label                n    reproduced share (min / median / max)
+    quotation           24    65% / 100% / 100%
+    partial_quotation    3     0% /  27% /  73%
+    paraphrase           1             23%
+    interpretation       3     0% /   0% /   8%
+    allusion             5     0% /   0% /   0%
+
+It agrees with the quotation/partial label on 25 of 27 pairs, and the two disagreements
+are both worth a human ruling rather than a code change:
+
+    Moroni 10 -> Isaiah 52   labelled partial_quotation, measured 0% reproduced.
+                             The wording is close but not verbatim ("awake and arise
+                             from the dust" against "awake, awake, put on thy strength"),
+                             so the rubric's reading is paraphrase.
+    3 Nephi 20 -> Isaiah 52  labelled partial_quotation, measured 73% of the chapter
+                             reproduced in a run of 7 verses, so the rubric's reading is
+                             quotation.
+
+Both labels are left as they are pending that ruling; the measurement is reported with
+them rather than silently overriding them.
+
+The classifier receives the measurement as its own clearly labelled block — "MEASURED
+REPRODUCTION (computed from the text, not a model judgement)" — and the extent guard now
+uses it in three tiers instead of the saturated chapter coverage: a `quotation` above 60%
+stands; between 10% and 60% it is recorded as `partial_quotation`; below 10% the wording
+is not there at all, so it becomes `paraphrase` and is flagged for review. Downgrade only,
+never a promotion.
+
+On the eight disagreement pairs the guard removed the worst error class — a quotation
+claimed where almost nothing is reproduced — from two cases to one (3 Nephi 19 at 0%
+reproduction now reads paraphrase with a review flag). Exact accuracy stayed at 1/8
+because the remaining calls are one-grade boundary disputes where the measurement
+supports either side.
+
 ## Classification stage
 
 Retrieval answers "these two passages look alike". `classifier.py` answers "what kind

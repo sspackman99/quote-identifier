@@ -345,8 +345,10 @@ def test_secondary_equal_to_primary_is_dropped():
 
 
 def test_extent_guard_downgrades_an_excerpt_called_a_quotation():
-    """Small models call excerpts quotations; a measured coverage decides instead."""
-    case = dict(CASE, retrieval={"best": 0.95, "support": 3, "coverage": 0.35})
+    """Small models call excerpts quotations; the measurement decides instead."""
+    case = dict(CASE, reproduction={"reproduced_share": 0.35, "reproduced_count": 3,
+                                    "verses_in_source": 15, "longest_run": 3,
+                                    "query_share": 0.2})
     result = RelationshipClassifier(lambda system, user: response(relationship="quotation")
                                     ).classify(case)
 
@@ -357,7 +359,9 @@ def test_extent_guard_downgrades_an_excerpt_called_a_quotation():
 
 
 def test_extent_guard_leaves_a_full_quotation_alone():
-    case = dict(CASE, retrieval={"best": 0.98, "support": 5, "coverage": 0.92})
+    case = dict(CASE, reproduction={"reproduced_share": 0.92, "reproduced_count": 11,
+                                    "verses_in_source": 12, "longest_run": 11,
+                                    "query_share": 0.8})
     result = RelationshipClassifier(lambda system, user: response(relationship="quotation")
                                     ).classify(case)
 
@@ -366,8 +370,49 @@ def test_extent_guard_leaves_a_full_quotation_alone():
 
 
 def test_extent_guard_never_promotes_a_label():
-    case = dict(CASE, retrieval={"best": 0.95, "coverage": 0.95})
+    case = dict(CASE, reproduction={"reproduced_share": 0.95, "reproduced_count": 12,
+                                    "verses_in_source": 12, "longest_run": 12,
+                                    "query_share": 0.9})
     result = RelationshipClassifier(lambda system, user: response(relationship="allusion")
                                     ).classify(case)
 
     assert result["relationship"] == "allusion"
+    assert result["guard_applied"] == ""
+
+
+def test_a_partial_label_with_high_reproduction_is_observed_not_promoted():
+    case = dict(CASE, reproduction={"reproduced_share": 0.73, "reproduced_count": 11,
+                                    "verses_in_source": 15, "longest_run": 7,
+                                    "query_share": 0.45})
+    result = RelationshipClassifier(
+        lambda system, user: response(relationship="partial_quotation")).classify(case)
+
+    assert result["relationship"] == "partial_quotation"
+    assert result["guard_applied"] == "observation"
+    assert "not promoted" in result["guard_note"]
+
+
+def test_the_prompt_shows_the_measured_reproduction():
+    case = dict(CASE, reproduction={"reproduced_share": 0.73, "reproduced_count": 11,
+                                    "verses_in_source": 15, "longest_run": 7,
+                                    "query_share": 0.45})
+    prompt = render_prompt(case)
+
+    assert "MEASURED REPRODUCTION" in prompt
+    assert "11 of 15" in prompt
+    assert "73%" in prompt
+
+
+def test_a_quotation_with_almost_no_reproduction_is_not_downgraded_to_partial():
+    """0% reproduction is not a short quotation; the wording is not there at all."""
+    case = dict(CASE, reproduction={"reproduced_share": 0.02, "reproduced_count": 0,
+                                    "verses_in_source": 26, "longest_run": 0,
+                                    "query_share": 0.01})
+    result = RelationshipClassifier(
+        lambda system, user: response(relationship="quotation")).classify(case)
+
+    assert result["relationship"] == "paraphrase"
+    assert result["guard_applied"] == "extent-no-reproduction"
+    assert result["needs_review"] is True
+    assert any("quotation cannot be supported" in reason
+               for reason in result["review_reasons"])

@@ -26,6 +26,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from coverage import extent_reading, measure
 from candidates import (
     aggregate_candidates,
     collect_matches,
@@ -89,6 +90,13 @@ def context_texts(texts, corpus, book, chapter, start, end, radius=CONTEXT_RADIU
     low = max(min(available), start - radius)
     high = min(max(available), end + radius)
     return verse_texts(texts, corpus, book, chapter, low, high)
+
+
+def chapter_of(texts, corpus, book, chapter):
+    """[(verse, text)] and the joined text for one chapter of one corpus."""
+    verses = sorted((verse, text) for (c, b, ch, verse), text in texts.items()
+                    if c == corpus and b == book and ch == chapter)
+    return verses, " ".join(text for _, text in verses)
 
 
 def parse_span(text):
@@ -176,6 +184,12 @@ def candidate_for(meta, embeddings, index, sizes, pair, texts, mode="retrieved")
         source_start = min(start for start, _ in source_intervals)
         source_end = max(end for _, end in source_intervals)
 
+    source_chapter_verses, _ = chapter_of(texts, "kjv", top["book"], top["chapter"])
+    _, query_chapter_text = chapter_of(texts, "bom", query_book, query_chapter)
+    reproduction = measure(source_chapter_verses, query_chapter_text)
+    reproduction["extent"] = extent_reading(reproduction)["extent"]
+    reproduction["extent_reason"] = extent_reading(reproduction)["reason"]
+
     case = build_case(
         query={
             "ref": pair["query"],
@@ -199,6 +213,7 @@ def candidate_for(meta, embeddings, index, sizes, pair, texts, mode="retrieved")
                          for window in top["pairs"]],
         retrieval={"best": top["best"], "support": top["support"],
                    "coverage": top["coverage"]},
+        reproduction=reproduction,
     )
 
     return {
@@ -209,6 +224,7 @@ def candidate_for(meta, embeddings, index, sizes, pair, texts, mode="retrieved")
         "source_range": top["source_range"],
         "best": top["best"],
         "retrieval_ok": f"{top['book']} {top['chapter']}" in expected_refs,
+        "reproduction": reproduction,
         "expected_target_span": (summary["credited"]["target"]["span"]
                                  if summary["credited"] else None),
         "expected_target_ref": (summary["credited"]["target"]["ref"]
@@ -332,6 +348,8 @@ def main(argv=None):
             "guard_original_relationship": result.get("guard_original_relationship", ""),
             "guard_note": result.get("guard_note", ""),
             "coverage_of_source": result.get("coverage_of_source"),
+            "reproduced_share": result.get("reproduced_share"),
+            "extent_reading": candidate["reproduction"].get("extent"),
             "secondary_relationship": result.get("secondary_relationship", ""),
             "explanation": result["explanation"],
             "evidence": result["evidence"],
@@ -345,10 +363,12 @@ def main(argv=None):
             "expected_target_span": candidate["expected_target_span"],
             "similarity": candidate["best"],
         })
+        share = candidate["reproduction"]["reproduced_share"]
         print(f"{pair['query']:<14} {expected:<18} {result['relationship']:<18} "
               f"{result['confidence']:>5.2f} {'yes' if result['needs_review'] else '-':<7} "
               f"{'y' if candidate['retrieval_ok'] else 'n':<4} "
-              f"{candidate['candidate_ref']:<16}")
+              f"{candidate['candidate_ref']:<16} rep {share:>4.0%} "
+              f"{result.get('guard_applied') or '':<11}")
 
     scored = [row for row in rows if row["predicted"]]
     correct = [row for row in scored if row["predicted"] == row["expected"]]
