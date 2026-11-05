@@ -10,11 +10,17 @@ QI_EMBEDDINGS_URL (see README.md).
 """
 
 import argparse
+import json
+import os
+import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 
 from chunking import build_chapter_token_stream, create_overlapping_windows
+from corpora import available_corpora, corpus_digest, format_reference
 from filtering import (
     build_ngram_document_frequencies,
     build_ngram_frequencies,
@@ -22,7 +28,7 @@ from filtering import (
     identify_ngrams_by_document_frequency,
     remove_high_freq_phrases,
 )
-from preprocess import preprocess_bom, resolve_corpus_path
+from preprocess import preprocess_corpus, resolve_corpus_path
 from similarity import (
     add_embeddings,
     add_minhashes,
@@ -52,16 +58,21 @@ MIN_DOCUMENT_FREQUENCY = 0.20
 # Fraction of WINDOWS, legacy occurrence-rate semantics. Used only to reproduce
 # the pre-document-frequency behaviour.
 LEGACY_OCCURRENCE_RATE = 0.01
+# Recorded in run metadata when embeddings are computed locally.
+LOCAL_EMBEDDING_MODEL = "all-mpnet-base-v2"
 
 
 def run(corpus_path, output_path="top_matches.csv", dedupe=True,
-        filter_metric="document"):
+        filter_metric="document", corpus_id="bom"):
     """Run the full pipeline and write the scored matches to a CSV."""
     # --------------------------------------------
     # 1. PREPROCESS
     # --------------------------------------------
     print("Preprocessing...")
-    corpus_data = preprocess_bom(str(corpus_path), remove_punctuation=False)
+    corpus_data = preprocess_corpus(
+        corpus_id, str(corpus_path), remove_punctuation=False
+    )
+    print(f"Verses: {len(corpus_data)} ({corpus_id})")
 
     # --------------------------------------------
     # 2. CHUNKING
@@ -168,25 +179,79 @@ def run(corpus_path, output_path="top_matches.csv", dedupe=True,
         w2 = windows[j]
         methods = method if isinstance(method, str) else ",".join(sorted(method))
 
-        rows.append({
-            "score": score,
-            "methods": methods,
-            "text_1": w1["text"],
-            "book_1": w1["book"],
-            "chapter_1": w1["chapter"],
-            "start_verse_1": w1["start_verse"],
-            "end_verse_1": w1["end_verse"],
-            "text_2": w2["text"],
-            "book_2": w2["book"],
-            "chapter_2": w2["chapter"],
-            "start_verse_2": w2["start_verse"],
-            "end_verse_2": w2["end_verse"],
-        })
+        row = {"score": score, "methods": methods}
+        for prefix, window in (("1", w1), ("2", w2)):
+            row[f"corpus_{prefix}"] = window["corpus"]
+            row[f"book_id_{prefix}"] = window.get("book_id")
+            row[f"book_{prefix}"] = window["book"]
+            row[f"chapter_{prefix}"] = window["chapter"]
+            row[f"verse_{prefix}"] = window["start_verse"]
+            row[f"end_verse_{prefix}"] = window["end_verse"]
+            row[f"ref_{prefix}"] = format_reference(
+                window["book"], window["chapter"],
+                window["start_verse"], window["end_verse"],
+            )
+            row[f"text_{prefix}"] = window["text"]
+        rows.append(row)
 
     df = pd.DataFrame(rows)
+
+    column_order = ["score", "methods"]
+    for prefix in ("1", "2"):
+        column_order += [f"corpus_{prefix}", f"book_id_{prefix}", f"book_{prefix}",
+                         f"chapter_{prefix}", f"verse_{prefix}", f"end_verse_{prefix}",
+                         f"ref_{prefix}", f"text_{prefix}"]
+    df = df.reindex(columns=column_order)
+
     df.to_csv(output_path, index=False)
     print(f"CSV saved as {output_path}")
+
+    write_run_metadata(
+        output_path,
+        corpus_id=corpus_id,
+        corpus_path=str(corpus_path),
+        corpus_digest=corpus_digest(corpus_path),
+        verses=len(corpus_data),
+        windows=len(windows),
+        filter_metric=filter_metric,
+        filter_threshold=(MIN_DOCUMENT_FREQUENCY if filter_metric == "document"
+                          else LEGACY_OCCURRENCE_RATE),
+        filtered_phrases=len(high_freq),
+        documents=total_documents,
+        ngram_n=NGRAM_N,
+        window_size=WINDOW_SIZE,
+        window_overlap=WINDOW_OVERLAP,
+        dedupe=dedupe,
+        top_n=TOP_N,
+        rows=len(df),
+        embedding_endpoint=os.environ.get("QI_EMBEDDINGS_URL", "local"),
+        embedding_model=os.environ.get("QI_EMBEDDINGS_MODEL", LOCAL_EMBEDDING_MODEL),
+    )
     return df
+
+
+def write_run_metadata(output_path, **facts) -> Path:
+    """Write <output>.meta.json so a CSV can always be traced to its settings."""
+    metadata = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_commit": _git_commit(),
+        **facts,
+    }
+    meta_path = Path(str(output_path) + ".meta.json")
+    meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Run metadata saved as {meta_path}")
+    return meta_path
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
 
 
 def main(argv=None):
@@ -196,6 +261,12 @@ def main(argv=None):
     parser.add_argument(
         "--corpus",
         help="path to the corpus text file (default: $QI_CORPUS, data/bom.txt, then ./bom.txt)",
+    )
+    parser.add_argument(
+        "--corpus-id",
+        choices=available_corpora(),
+        default="bom",
+        help="which parser to use for the file (default: bom)",
     )
     parser.add_argument(
         "--output",
@@ -223,9 +294,9 @@ def main(argv=None):
     except FileNotFoundError as exc:
         parser.exit(2, f"{parser.prog}: error: {exc}\n")
 
-    print(f"Corpus: {corpus_path}")
+    print(f"Corpus: {corpus_path} ({args.corpus_id})")
     run(corpus_path, args.output, dedupe=not args.no_dedupe,
-        filter_metric=args.filter_metric)
+        filter_metric=args.filter_metric, corpus_id=args.corpus_id)
     return 0
 
 

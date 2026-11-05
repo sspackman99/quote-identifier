@@ -5,23 +5,33 @@
 
 from collections import defaultdict
 
+from corpora import slugify
+
 
 def build_chapter_token_stream(processed_verses):
     """
-    Groups verses by (book, chapter) and creates a continuous
+    Groups verses by (corpus, book, chapter) and creates a continuous
     token stream per chapter while preserving verse mapping.
+
+    Canonical verse records carry the corpus and a stable book_id, so two
+    corpora with the same book/chapter never collapse into one chapter stream.
     """
     
     chapters = defaultdict(list)
     
     # Group verses
     for verse in processed_verses:
-        key = (verse["book"], verse["chapter"])
+        key = (
+            verse.get("corpus", "bom"),
+            verse.get("book_id") or slugify(verse["book"]),
+            verse["book"],
+            verse["chapter"],
+        )
         chapters[key].append(verse)
     
     chapter_streams = []
     
-    for (book, chapter), verses in chapters.items():
+    for (corpus_id, book_id, book, chapter), verses in chapters.items():
         
         all_tokens = []
         token_to_verse = []
@@ -32,7 +42,8 @@ def build_chapter_token_stream(processed_verses):
                 token_to_verse.append(verse["verse"])
         
         chapter_streams.append({
-            "corpus": "bom",
+            "corpus": corpus_id,
+            "book_id": book_id,
             "book": book,
             "chapter": chapter,
             "tokens": all_tokens,
@@ -88,6 +99,7 @@ def create_overlapping_windows(chapter_streams,
 
             windows.append({
                 "corpus": chapter_data["corpus"],
+                "book_id": chapter_data.get("book_id"),
                 "book": chapter_data["book"],
                 "chapter": chapter_data["chapter"],
                 "start_token_index": i,

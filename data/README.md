@@ -21,6 +21,27 @@ Any one of these, in priority order:
 With no argument, `main.py` looks for `data/bom.txt`, then `./bom.txt`, and
 exits with a message naming every location it checked if neither exists.
 
+Register the second corpus yourself, for cross-corpus work:
+
+    cp /path/to/kjv.txt data/kjv.txt
+
+## Corpus formats
+
+Each source has its own parser (`corpora.py`); pick it with `--corpus-id`:
+
+    bom   Project Gutenberg Book of Mormon — book titles, chapter headings, inline
+          "4 Nephi 1:1" verse markers. data/bom.txt (7.5k lines).
+    kjv   King James Bible, one verse per line: "Genesis 1:1<TAB>In the beginning...".
+          data/kjv.txt (31,102 verses).
+
+A parser that meets a line it cannot classify raises an error naming the line number
+instead of dropping it, so a truncated download cannot pass as a shorter canon.
+
+The Pearl of Great Price and Doctrine and Covenants are not parsed yet; both use
+different layouts again ("Moses: Chapter 1" with bare verse numbers; sections rather
+than chapters) and need their own parsers.
+
+
 ## Fetching a text
 
 The Book of Mormon is available from Project Gutenberg

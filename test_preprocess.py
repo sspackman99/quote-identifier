@@ -19,71 +19,13 @@ class TestLoadText:
         assert content == "Hello world\nThis is a test."
         assert "hello" in content.lower()
 
+    def test_load_text_strips_utf8_bom(self, tmp_path):
+        test_file = tmp_path / "bom_marked.txt"
+        test_file.write_bytes("\ufeff1 Nephi Chapter 1".encode("utf-8"))
 
-class TestSplitBookChapters:
-    """Test book/chapter splitting functionality."""
+        from preprocess import load_text
 
-    def test_split_with_standard_header(self):
-        """Test splitting text with standard book/chapter header."""
-        text = """1 Nephi Chapter 1
-I, Nephi, being caused that I should know the beginnings
-of the year. And the first year of the reign of the
-liberty of the children of Israel.
-"""
-        
-        from preprocess import split_book_chapters
-        
-        sections = split_book_chapters(text)
-        
-        assert len(sections) == 1
-        assert sections[0][0] == "1 Nephi Chapter 1"
-        assert "I, Nephi, being caused" in sections[0][1]
-
-
-class TestParseHeader:
-    """Test header parsing functionality."""
-
-    def test_parse_valid_header(self):
-        """Test parsing a valid book/chapter header."""
-        from preprocess import parse_header
-        
-        result = parse_header("1 Nephi Chapter 1")
-        
-        assert result[0] == "1 Nephi"
-        assert result[1] == 1
-
-    def test_parse_header_with_extra_spaces(self):
-        """Test parsing header with extra whitespace."""
-        from preprocess import parse_header
-        
-        result = parse_header("  2 2 Nephi   Chapter   2  ")
-        
-        # The regex expects exact spacing pattern, so this may not parse correctly
-        # This is testing that we handle the standard format
-        # If the format is irregular, it may return None
-        assert result is not None or "2 Nephi" in str(result)
-
-
-class TestSplitVerses:
-    """Test verse splitting functionality."""
-
-    def test_split_simple_verses(self):
-        """Test splitting a chapter body into verses."""
-        chapter_body = """1:1 I, Nephi, being caused that I should know
-the beginnings of the year.
-1:2 And the first year of the reign of the
-liberty of the children of Israel.
-"""
-        
-        from preprocess import split_verses
-        
-        verses = split_verses(chapter_body)
-        
-        assert len(verses) == 2
-        assert verses[0][0] == "1:1"
-        assert "I, Nephi, being caused" in verses[0][1]
-        assert verses[1][0] == "1:2"
-        assert "first year" in verses[1][1]
+        assert load_text(str(test_file)) == "1 Nephi Chapter 1"
 
 
 class TestNormalizeText:
@@ -190,22 +132,23 @@ children of Israel.
         
         assert len(result) == 2
         
-        # Check first verse
+        # Canonical fields, not display strings
         v1 = result[0]
         assert v1["corpus"] == "bom"
+        assert v1["book_id"] == "1-nephi"
         assert v1["book"] == "1 Nephi"
         assert v1["chapter"] == 1
-        assert v1["verse"] == "1:1"
+        assert v1["verse"] == 1
+        assert v1["source_ref"] == "1 Nephi 1:1"
+        assert v1["source_line"] > 0
         assert "i, nephi, being caused" in v1["clean_text"]
-        assert v1["tokens"] is not None
         assert len(v1["tokens"]) > 0
         
         # Check second verse
         v2 = result[1]
-        assert v2["corpus"] == "bom"
-        assert v2["book"] == "1 Nephi"
+        assert v2["book_id"] == "1-nephi"
         assert v2["chapter"] == 1
-        assert v2["verse"] == "1:2"
+        assert v2["verse"] == 2
         assert "first year" in v2["clean_text"]
 
     def test_preprocess_with_punctuation_removal(self, tmp_path):
@@ -249,18 +192,23 @@ children of Israel.
         result = preprocess_bom(str(test_file))
         
         assert len(result) == 3
-        
-        # First verse should have correct metadata
-        assert result[0]["book"] == "1 Nephi"
-        assert result[0]["chapter"] == 1
-        assert result[0]["verse"] == "1:1"
-        
-        # Second verse should have correct metadata
-        assert result[1]["book"] == "1 Nephi"
-        assert result[1]["chapter"] == 1
-        assert result[1]["verse"] == "1:2"
-        
-        # Third verse should have correct metadata
-        assert result[2]["book"] == "1 Nephi"
-        assert result[2]["chapter"] == 1
-        assert result[2]["verse"] == "1:3"
+        assert [v["verse"] for v in result] == [1, 2, 3]
+        assert [v["book_id"] for v in result] == ["1-nephi"] * 3
+        assert [v["source_ref"] for v in result] == [
+            "1 Nephi 1:1", "1 Nephi 1:2", "1 Nephi 1:3",
+        ]
+        # raw verse text is preserved for audit
+        assert result[0]["text"] == "First verse text here."
+        assert result[0]["original_text"] == result[0]["text"]
+
+    def test_preprocess_corpus_dispatches_by_corpus_id(self, tmp_path):
+        test_file = tmp_path / "verse.txt"
+        test_file.write_text("Genesis 1:1\tIn the beginning God created\n")
+
+        from preprocess import preprocess_corpus
+
+        records = preprocess_corpus("kjv", str(test_file))
+
+        assert records[0]["corpus"] == "kjv"
+        assert records[0]["book_id"] == "genesis"
+        assert records[0]["tokens"] == ["in", "the", "beginning", "god", "created"]

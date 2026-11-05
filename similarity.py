@@ -67,7 +67,7 @@ def embed_texts_via_http(texts, url, model, batch_size=64, timeout=300):
 
     Returns an L2-normalized float32 array, one row per input text.
     """
-    rows = []
+    batch_arrays = []
 
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
@@ -92,11 +92,16 @@ def embed_texts_via_http(texts, url, model, batch_size=64, timeout=300):
                 f"for {len(batch)} inputs"
             )
 
-        rows.extend(item["embedding"] for item in items)
+        # Convert each batch to float32 immediately: accumulating the JSON
+        # response as Python floats costs ~8x the memory of the array, which
+        # matters once a corpus reaches tens of thousands of windows.
+        batch_arrays.append(
+            np.asarray([item["embedding"] for item in items], dtype="float32")
+        )
         print(f"  embedded {min(start + batch_size, len(texts))}/{len(texts)} windows",
               flush=True)
 
-    return _normalize_rows(np.array(rows, dtype="float32"))
+    return _normalize_rows(np.vstack(batch_arrays))
 
 
 def add_embeddings(windows,

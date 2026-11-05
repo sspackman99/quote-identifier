@@ -28,6 +28,47 @@ One index must be built from ONE embedding model. Mixing vectors from different 
 (e.g. `all-mpnet-base-v2` locally and `embeddinggemma-300m` from a server) inside a
 single run is meaningless, so pick one per run.
 
+## Corpora
+
+Corpus text is external (see `data/README.md`). Each source has its own parser, and all of
+them emit the same canonical record:
+
+    corpus, book_id, book, chapter, verse, text, source_ref, source_line
+
+- `corpus`: corpus id, e.g. `bom`, `kjv`
+- `book_id`: stable identifier — `isaiah` from any source, whatever its heading style
+- `chapter`, `verse`: integers
+- `source_ref`, `source_line`: what the file actually printed and where, for audit
+
+Registered parsers (`corpora.CORPUS_PARSERS`):
+
+    bom   Project Gutenberg Book of Mormon (book titles, chapter headings, inline
+          4 Nephi verse markers)
+    kjv   one tab-separated verse per line: "Genesis 1:1<TAB>In the beginning..."
+
+Parse one corpus through its own parser:
+
+    python main.py --corpus data/bom.txt --corpus-id bom
+    python main.py --corpus data/kjv.txt --corpus-id kjv
+
+A line that is neither a header nor a verse raises `CorpusFormatError` naming the line
+number, instead of being dropped — a truncated file must not look like a shorter canon.
+
+### Cross-corpus retrieval
+
+`cross_corpus.py` windows both corpora into one index and asks what a chapter of one
+quotes from the other:
+
+    QI_EMBEDDINGS_URL=http://10.77.1.117:8001/v1/embeddings \
+    QI_EMBEDDINGS_MODEL=embeddinggemma-300m \
+    python cross_corpus.py --bom data/bom.txt --kjv data/kjv.txt \
+        --query "Mosiah 14" --top 10 --json cc_mosiah14.json
+
+It reports, for each target chapter, how many candidate windows of the query chapter
+pointed at it, with best and mean similarity, plus whether Isaiah 53 was retrieved.
+Common trigrams are filtered once over the pooled corpus so both sides lose the same
+boilerplate. MinHash is not used here: this stage is about embedding retrieval.
+
 ## Output
 
 `top_matches.csv` holds the highest-scoring candidate pairs:
