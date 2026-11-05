@@ -69,6 +69,24 @@ pointed at it, with best and mean similarity, plus whether Isaiah 53 was retriev
 Common trigrams are filtered once over the pooled corpus so both sides lose the same
 boilerplate. MinHash is not used here: this stage is about embedding retrieval.
 
+### Retrieval evaluation
+
+`evaluate_retrieval.py` scores the retriever against a labelled set
+(`evaluation_pairs.py`): 21 quotation pairs (1 Nephi 20-21, 2 Nephi 7-8, 2 Nephi 12-24,
+Mosiah 14, 3 Nephi 22, 3 Nephi 24-25 against their Isaiah/Malachi sources), 3 paraphrase
+pairs (3 Nephi 12-14 against Matthew 5-7) and 3 controls with no KJV source (Alma 43,
+Ether 1, Moroni 9).
+
+    QI_EMBEDDINGS_URL=http://10.77.1.117:8001/v1/embeddings \
+    QI_EMBEDDINGS_MODEL=embeddinggemma-300m \
+    python evaluate_retrieval.py --cache-index .eval_cache --json eval_result.json
+
+It builds one pooled index (cached in `.eval_cache/` after the first run, so re-scoring
+is seconds rather than minutes), ranks KJV chapters for each query chapter by window
+hits, and reports recall@1/5/20 for quotations and paraphrases separately, plus what the
+controls returned — a control that lands on a chapter with a high score is false-positive
+pressure worth seeing.
+
 ## Output
 
 `top_matches.csv` holds the highest-scoring candidate pairs:

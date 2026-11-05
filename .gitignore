@@ -213,3 +213,6 @@ __marimo__/
 
 # agent worktrees (local only)
 .worktrees/
+
+# retrieval evaluation cache (embeddings + window metadata)
+.eval_cache/
