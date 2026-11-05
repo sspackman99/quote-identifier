@@ -148,14 +148,19 @@ PAIRS = [
     {"query": "Alma 7", "expected": "Isaiah 53", "kind": "allusion",
      "family": "isaiah-53", "query_span": "10-12", "expected_span": "4",
      "confidence": "low", "reviewed": True,
+     "second_review": "agreed low confidence; Matthew 8:17 kept as a possible "
+                      "intermediary and the qualification preserved",
      "note": "Alma 7:10-12 take up the servant's pains and sicknesses; the link may "
              "be mediated through Matthew 8:17, which applies Isaiah's language to "
              "Jesus"},
     {"query": "3 Nephi 19", "expected": "John 17", "kind": "allusion",
      "family": "john-17", "query_span": "20-23,28-29", "expected_span": "11,20-23",
-     "confidence": "medium", "reviewed": True,
+     "confidence": "high", "reviewed": True,
      "note": "The prayer's language of being one, the Father in Christ and Christ in "
-             "his followers tracks John 17:11, 20-23"},
+             "his followers tracks John 17:11, 20-23. Confidence raised to high after a "
+             "second textual review agreed the reuse is strong and structural; it stays "
+             "kind=allusion because the wording is adapted, not reproduced. Confidence "
+             "records certainty about the relationship, not verbatimness."},
 
     # ---- interpretation / commentary -------------------------------------
     # Contextual dependence; scored separately, excluded from retrieval recall.
@@ -179,6 +184,9 @@ PAIRS = [
     {"query": "Helaman 5", "expected": "Luke 9", "kind": "allusion",
      "family": "transfiguration", "query_span": "28-29", "expected_span": "34-35",
      "confidence": "low", "reviewed": True,
+     "second_review": "agreed as a low-confidence allusion: the transfiguration pattern "
+                      "is recognizable, but this scene has the voice commanding "
+                      "repentance rather than declaring the Beloved Son",
      "note": "reviewed: the cloud that overshadows and the voice out of it pattern on "
              "the transfiguration ('there came a cloud, and overshadowed them ... a "
              "voice out of the cloud'); best 0.7975, reworded. Low confidence: the "
@@ -193,6 +201,8 @@ PAIRS = [
     {"query": "Ether 1", "expected": "Genesis 26", "kind": "allusion",
      "family": "abrahamic-promise", "query_span": "43", "expected_span": "3-4",
      "confidence": "low", "reviewed": True,
+     "second_review": "agreed: a recognizable Abrahamic covenant formula, not merely "
+                      "inherited vocabulary; low-confidence allusion rather than a control",
      "note": "reviewed, reconsidered twice: 'I will bless thee and thy seed' plus a "
              "promise to raise up a great nation follows the Abrahamic covenant formula "
              "of Genesis 26:3-4 (land, multiplied seed, all nations blessed). The wording "
@@ -202,6 +212,8 @@ PAIRS = [
     {"query": "Helaman 11", "expected": "Psalms 85", "kind": "allusion",
      "family": "psalm-85", "query_span": "11-12", "expected_span": "4-5",
      "confidence": "low", "reviewed": True,
+     "second_review": "agreed: stronger than generic prayer language, verbal and "
+                      "rhetorical correspondence; not a quotation",
      "note": "reviewed: Nephi's plea that God turn away his anger follows Psalm 85's "
              "prayer ('cause thine anger toward us to cease ... wilt thou be angry with "
              "us for ever'); 27 window matches, best 0.8353. A prayer formula, not a "
@@ -286,6 +298,7 @@ def all_pairs():
             "confidence": row.get("confidence", "high"),
             "note": row.get("note", ""),
             "reviewed": bool(row.get("reviewed", False)),
+            "second_review": row.get("second_review", ""),
         }
         record["split"] = split_for_family(record["family"])
 

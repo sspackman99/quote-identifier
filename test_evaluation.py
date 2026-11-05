@@ -475,3 +475,15 @@ def test_ether_1_is_no_longer_a_clean_negative_control():
     assert pair["confidence"] == "low"
     assert pair["reviewed"]
     assert "Abrahamic" in pair["note"]
+
+
+def test_independently_reviewed_labels_record_both_opinions():
+    """The five reviewed cases carry the second textual review beside the first."""
+    by_query = {pair["query"]: pair for pair in all_pairs()}
+
+    for query in ("Ether 1", "Helaman 5", "Helaman 11", "Alma 7"):
+        assert by_query[query]["second_review"], f"{query} has no second review"
+        assert by_query[query]["confidence"] == "low"
+
+    assert by_query["3 Nephi 19"]["confidence"] == "high"
+    assert "second textual review" in by_query["3 Nephi 19"]["note"]
