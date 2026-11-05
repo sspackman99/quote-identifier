@@ -176,6 +176,57 @@ primary), 0 control false positives, 2 accepted context pairs, precision 0.78, r
 false-positive rate 0.00 over 8 reviewed controls. The threshold remains untuned, and eight
 controls is not a reliable estimate of false-positive behaviour in general.
 
+## Classification stage
+
+Retrieval answers "these two passages look alike". `classifier.py` answers "what kind
+of relationship is that, and how sure are we", and it is deliberately separate from
+`main.py` so a retrieval run does not pay for a model call.
+
+The module is provider-agnostic and does no I/O of its own:
+
+    case = build_case(query={...}, source={...}, matched_windows=[...], retrieval={...})
+    result = RelationshipClassifier(complete).classify(case)
+
+`complete` is any callable `(system_prompt, user_prompt) -> str`; `http_completer()` wraps
+an OpenAI-compatible chat endpoint and reads `QI_LLM_URL`, `QI_LLM_MODEL`, `QI_LLM_KEY`,
+`QI_LLM_TIMEOUT` and `QI_LLM_MAX_TOKENS`. Generation is bounded and reasoning-model
+"thinking" is off unless `--thinking` is passed, because this is a short-answer task.
+
+Two kinds of evidence are passed and never merged: the MATCHED window pairs retrieval
+actually found, and SURROUNDING CONTEXT on both sides. The system prompt says that only
+matched evidence can support a quotation, and that context-only similarity never can —
+otherwise a broad contextual resemblance gets reported as verbatim reuse.
+
+`classify()` returns structured fields, not prose:
+
+    relationship   one of the seven taxonomy labels
+    confidence     0..1, as reported by the model
+    query_span     verses in the query carrying the relationship
+    source_span    verses in the source being used
+    explanation    one or two sentences
+    evidence       short quotes drawn from the matched evidence
+    needs_review   set by the model OR by policy, with review_reasons recorded
+
+The policy escalates regardless of what the model claims: confidence below 0.75, a model
+flag, "unrelated" at similarity 0.85 or above, and any dependent label without verse
+spans. Malformed answers are errors rather than a silent `unrelated`: a label outside the
+taxonomy, a confidence outside 0..1, a missing explanation, or a dependent label with no
+quoted evidence all raise `ClassifierResponseError`.
+
+`classify_evaluation.py` runs the classifier over `evaluation_pairs.py` and scores it
+against the labels. `--candidate retrieved` classifies what a user would actually be
+shown, so errors mix retrieval and classification; `--candidate expected` classifies the
+labelled source chapter and measures classification by itself. The confusion matrix is
+reported for retrieval-correct pairs, because the classifier cannot be blamed for a
+candidate it was never given.
+
+    python classify_evaluation.py --limit 1 --only "Moroni 10" --dry-run
+    QI_LLM_URL=http://host:8000/v1/chat/completions QI_LLM_MODEL=my-model \
+        python classify_evaluation.py --candidate expected --json classification.json
+
+Nothing here changes retrieval: scores, threshold, spans and ranking are untouched, and
+the classifier is not yet wired into `main.py`'s CSV.
+
 ## Output
 
 `top_matches.csv` holds the highest-scoring candidate pairs:
