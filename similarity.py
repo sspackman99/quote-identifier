@@ -1,11 +1,17 @@
 # similarity.py
 
-from datasketch import MinHash, MinHashLSH
-from sentence_transformers import SentenceTransformer
+import json
+import os
+import urllib.request
+
 import numpy as np
 import faiss
-from sklearn.metrics.pairwise import cosine_similarity
-import torch
+from datasketch import MinHash, MinHashLSH
+
+DEFAULT_LOCAL_MODEL = "all-mpnet-base-v2"
+DEFAULT_HTTP_MODEL = "embeddinggemma-300m"
+EMBEDDINGS_URL_ENV = "QI_EMBEDDINGS_URL"
+EMBEDDINGS_MODEL_ENV = "QI_EMBEDDINGS_MODEL"
 
 # -------------------------------------------------
 # 1. MINHASH
@@ -45,29 +51,95 @@ def find_minhash_matches(windows, lsh):
 # 2. EMBEDDINGS + FAISS (GPU ENABLED)
 # -------------------------------------------------
 
+def _normalize_rows(matrix):
+    """L2-normalize each row so cosine similarity is a plain inner product."""
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return (matrix / norms).astype("float32")
+
+
+def embed_texts_via_http(texts, url, model, batch_size=64, timeout=300):
+    """Embed texts through an OpenAI-compatible POST /v1/embeddings endpoint.
+
+    Lets a machine without a GPU — or without torch/sentence-transformers at all
+    — use an embedding server running on a host that has one, e.g. the llama.cpp
+    server on ozai: QI_EMBEDDINGS_URL=http://10.77.1.117:8001/v1/embeddings.
+
+    Returns an L2-normalized float32 array, one row per input text.
+    """
+    rows = []
+
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        payload = json.dumps({"model": model, "input": batch}).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        items = body.get("data") or []
+        if not items:
+            raise RuntimeError(
+                f"embedding endpoint {url} returned no data: {str(body)[:200]}"
+            )
+        if all("index" in item for item in items):
+            items = sorted(items, key=lambda item: item["index"])
+        if len(items) != len(batch):
+            raise RuntimeError(
+                f"embedding endpoint returned {len(items)} vectors "
+                f"for {len(batch)} inputs"
+            )
+
+        rows.extend(item["embedding"] for item in items)
+        print(f"  embedded {min(start + batch_size, len(texts))}/{len(texts)} windows",
+              flush=True)
+
+    return _normalize_rows(np.array(rows, dtype="float32"))
+
+
 def add_embeddings(windows,
                    text_field="filtered_text",
-                   model_name="all-mpnet-base-v2",
-                   batch_size=64):
-    
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-    
-    model = SentenceTransformer(model_name, device=device)
-    
+                   model_name=None,
+                   batch_size=64,
+                   url=None):
+    """Attach an L2-normalized embedding to every window.
+
+    If an embedding endpoint is configured (the `url` argument or the
+    QI_EMBEDDINGS_URL environment variable), embeddings are fetched over HTTP
+    and torch / sentence-transformers are never imported — that is what lets
+    this pipeline run on a CPU-only box using a GPU host's embedding server.
+    Otherwise the model runs locally through sentence-transformers.
+    """
     texts = [w[text_field] for w in windows]
-    
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True  # IMPORTANT
-    )
-    
+
+    url = url or os.environ.get(EMBEDDINGS_URL_ENV)
+
+    if url:
+        model = model_name or os.environ.get(EMBEDDINGS_MODEL_ENV, DEFAULT_HTTP_MODEL)
+        print(f"Embedding via {url} (model {model})")
+        embeddings = embed_texts_via_http(texts, url, model, batch_size=batch_size)
+    else:
+        import torch
+        from sentence_transformers import SentenceTransformer
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
+
+        model = SentenceTransformer(model_name or DEFAULT_LOCAL_MODEL, device=device)
+
+        embeddings = model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            normalize_embeddings=True  # IMPORTANT
+        )
+
     for window, emb in zip(windows, embeddings):
         window["embedding"] = emb
-    
+
     return windows
 
 
