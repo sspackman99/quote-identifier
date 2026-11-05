@@ -217,16 +217,17 @@ def test_rank_chapters_handles_empty_candidates():
 
 
 def _row(query, expected, rank, top1, top1_best, kind="quotation", split="dev",
-         also_expected=None):
+         also_expected=None, spans=None):
     # both ranking rules are carried on a result row; these tests exercise the
     # metric arithmetic, so the two ranks are set to the same value
+    spans = spans or {}
     targets = []
     if expected:
-        targets.append({"ref": expected, "span": "whole", "kind": kind,
+        targets.append({"ref": expected, "span": spans.get(expected, "whole"), "kind": kind,
                         "query_span": "whole", "confidence": "high",
                         "reviewed": True, "note": "", "primary": True})
     for extra in also_expected or []:
-        targets.append({"ref": extra, "span": "whole", "kind": kind,
+        targets.append({"ref": extra, "span": spans.get(extra, "whole"), "kind": kind,
                         "query_span": "whole", "confidence": "high",
                         "reviewed": True, "note": "", "primary": False})
     return {"query": query, "expected": expected, "kind": kind, "split": split,
@@ -346,3 +347,90 @@ def test_reviewed_chapters_that_pattern_on_a_passage_are_positives():
 
     assert by_query["Helaman 5"]["kind"] == "allusion"
     assert by_query["Helaman 11"]["kind"] == "allusion"
+
+
+# -------------------------------------------------
+# Span-valid target selection (818b39b review)
+# -------------------------------------------------
+def _target(ref, span, query_span=("21", "24"), primary=True, family="isaiah-52"):
+    return {"ref": ref, "span": span, "query_span": "-".join(query_span),
+            "kind": "partial_quotation", "confidence": "high",
+            "reviewed": True, "note": "", "family": family, "primary": primary}
+
+
+def _candidate(book, chapter, rank, intervals, query_intervals, best=0.95):
+    return {"book": book, "chapter": chapter, "rank": rank, "best": best,
+            "support": 2, "coverage": 0.5, "source_intervals": intervals,
+            "query_intervals": query_intervals, "pairs": [], "matches": 2}
+
+
+def test_top_rank_alone_does_not_earn_span_credit():
+    """The defect the review found: a high rank with the wrong span must not win."""
+    from evaluate_retrieval import resolve_targets, summarise_targets
+
+    targets = [_target("Isaiah 52", "7-10"), _target("Exodus 20", "2-4", ("34", "36"),
+                                                     primary=False,
+                                                     family="exodus-20-decalogue")]
+    span_candidates = {
+        ("Isaiah", 52): _candidate("Isaiah", 52, 1, [(90, 91)], [(1, 2)]),   # rank 1, wrong span
+        ("Exodus", 20): _candidate("Exodus", 20, 4, [(2, 4)], [(34, 36)]),   # rank 4, right span
+    }
+    chapter_ranked = [
+        {"book": "Isaiah", "chapter": 52}, {"book": "Psalms", "chapter": 2},
+        {"book": "Judges", "chapter": 5}, {"book": "Exodus", "chapter": 20},
+    ]
+
+    summary = summarise_targets(resolve_targets(chapter_ranked, span_candidates, targets))
+
+    assert summary["span_rank"] == 4, "credit must come from the span-valid target"
+    assert summary["credited"]["target"]["ref"] == "Exodus 20"
+    assert summary["primary_span_rank"] is None, "the primary target missed its span"
+    assert summary["chapter_rank"] == 1, "chapter retrieval is a separate tier"
+
+
+def test_localization_requires_the_query_verses_to_match():
+    from evaluate_retrieval import resolve_targets, summarise_targets
+
+    targets = [_target("Isaiah 52", "7-10")]
+    span_candidates = {("Isaiah", 52): _candidate("Isaiah", 52, 1, [(7, 10)], [(1, 2)])}
+    chapter_ranked = [{"book": "Isaiah", "chapter": 52}]
+
+    summary = summarise_targets(resolve_targets(chapter_ranked, span_candidates, targets))
+
+    assert summary["span_rank"] == 1
+    assert summary["localized_rank"] is None, "query span 21-24 was not touched"
+
+
+def test_threshold_credit_requires_the_top_hit_to_touch_its_span():
+    row = _row("Mosiah 12", "Isaiah 52", 1, "Isaiah 52", 0.96,
+               kind="partial_quotation", also_expected=["Exodus 20"],
+               spans={"Isaiah 52": "7-10", "Exodus 20": "2-4"})
+    row["top1_intervals"] = [(90, 91)]          # rank 1, but not verses 7-10
+
+    metrics = threshold_metrics([row], 0.90)
+
+    assert metrics["true_positives"] == 0
+    assert metrics["false_positives_other"] == 1
+
+    row["top1_intervals"] = [(7, 9)]
+    assert threshold_metrics([row], 0.90)["true_positives"] == 1
+
+
+def test_every_target_family_is_assigned_and_matches_the_pair_split():
+    from evaluation_pairs import FAMILY_SPLITS
+
+    for pair in all_pairs():
+        for target in pair["expected_targets"]:
+            family = target["family"]
+            assert family in FAMILY_SPLITS, f"{pair['query']} -> {target['ref']}: {family}"
+            assert FAMILY_SPLITS[family] == pair["split"], (
+                f"{pair['query']} -> {target['ref']} family '{family}' is "
+                f"{FAMILY_SPLITS[family]} but the pair is {pair['split']}"
+            )
+
+
+def test_secondary_targets_keep_their_own_family():
+    pair = next(p for p in all_pairs() if p["query"] == "Mosiah 12")
+    families = {t["ref"]: t["family"] for t in pair["expected_targets"]}
+
+    assert families == {"Isaiah 52": "isaiah-52", "Exodus 20": "exodus-20-decalogue"}

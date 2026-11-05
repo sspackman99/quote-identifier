@@ -196,3 +196,17 @@ def test_paired_evidence_records_which_window_matched_which():
     assert candidate["pairs"][0] == {"sim": 0.9, "query_range": "1-2", "source_range": "4-5"}
     assert candidate["pairs"][1]["source_range"] == "6-7"
     assert candidate["pairs"][0]["sim"] > candidate["pairs"][1]["sim"]
+
+
+def test_paired_evidence_is_complete_not_truncated():
+    """A later classifier must receive every pair, not the strongest ten."""
+    meta = [window("Mosiah", 14, 1, 2, corpus="bom")] + [
+        window("Isaiah", 53, verse, verse + 1) for verse in range(1, 15)
+    ]
+    matches = [match(0.99 - 0.01 * index, 0, index)
+               for index in range(1, 14)]          # 13 supporting windows
+
+    candidate = aggregate_candidates(meta, matches)[("Isaiah", 53)]
+
+    assert candidate["matches"] == 13
+    assert len(candidate["pairs"]) == 13

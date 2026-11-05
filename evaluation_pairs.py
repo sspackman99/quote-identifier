@@ -34,6 +34,8 @@ split and turn the held-out set into a rerun of development.
 FAMILY_SPLITS = {
     "transfiguration": "test",
     "psalm-85": "test",
+    "exodus-20-decalogue": "test",
+    "acts-2-pentecost": "test",
     "isaiah-2-14": "dev",
     "isaiah-48-49": "test",
     "isaiah-50-51": "dev",
@@ -110,6 +112,7 @@ PAIRS = [
      "note": "Mosiah 12:21-24 reproduces Isaiah 52:7-10",
      "also_expected": [
          {"ref": "Exodus 20", "span": "2-4", "query_span": "34-36",
+          "family": "exodus-20-decalogue",
           "kind": "quotation", "reviewed": True, "confidence": "high",
           "note": "a SECOND, independent quotation in the same chapter: Mosiah "
                   "12:34-36 reproduces Exodus 20:2-4 (the Decalogue). Crediting only "
@@ -181,7 +184,8 @@ PAIRS = [
              "voice out of the cloud'); best 0.7975, reworded. Low confidence: the "
              "scene is patterned, the wording is not reproduced.",
      "also_expected": [
-         {"ref": "Acts 2", "span": "3-4", "query_span": "45", "kind": "allusion",
+         {"ref": "Acts 2", "span": "3-4", "query_span": "45",
+          "family": "acts-2-pentecost", "kind": "allusion",
           "confidence": "low", "reviewed": True,
           "note": "the Spirit descending as fire, and speech following, patterns on "
                   "Pentecost; best 0.7754"},
@@ -292,6 +296,7 @@ def all_pairs():
                 "reviewed": record["reviewed"],
                 "note": record["note"],
                 "query_span": record["query_span"],
+                "family": record["family"],
                 "primary": True,
             })
         for extra in row.get("also_expected", []):
@@ -303,6 +308,7 @@ def all_pairs():
                 "reviewed": bool(extra.get("reviewed", False)),
                 "note": extra.get("note", ""),
                 "query_span": extra.get("query_span", record["query_span"]),
+                "family": extra.get("family", record["family"]),
                 "primary": False,
             })
         record["expected_targets"] = targets

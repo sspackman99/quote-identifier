@@ -135,15 +135,31 @@ similarity is 0.8169 (Ether 1, the Abraham/Isaac land-and-seed formula). Two cha
 began as controls, Helaman 5 and Helaman 11, were moved to low-confidence allusions: they
 pattern on the transfiguration and on Psalm 85 without reproducing either.
 
-Measured on the current set (69,929 windows, 50 neighbours, tie tolerance 0.01). Note that
-the label review moved two controls into the positive set, so these denominators differ
-from earlier runs and the numbers are not directly comparable to them:
+Credit is span-valid. A candidate chapter earns recall credit only when its matched source
+range actually touches that target's annotated span, and localization credit only when the
+matched query range touches the verses doing the quoting. A high rank with the wrong verses
+therefore earns nothing, and a lower-ranked expected source with the right verses gets the
+credit instead. The threshold metrics apply the same rule: a top-1 hit counts as a true
+positive only if its reference and its matched range both satisfy a labelled target.
 
-    ranking     scope        dev @1   test @1   test @5   test @20   partials @5
-    chapter     any source   20/20    8/12      10/12     10/12      2/3
-    chapter     primary      20/20    8/12      9/12      10/12      -
-    span        any source   20/20    10/12     11/12     11/12      3/3
-    span        primary      20/20    9/12      11/12     11/12      -
+Recall is reported in distinct tiers rather than one number: chapter retrieved, source span,
+source span plus query localization, and the primary target on its own. Paired evidence is
+kept in full (no top-ten cut); the row records `source_pairs_total` so a consumer can see it
+is complete.
+
+Measured on the current set (69,929 windows, 50 neighbours, tie tolerance 0.01). The label
+review moved two controls into the positive set, so these denominators differ from earlier
+runs and the numbers are not directly comparable to them:
+
+    tier                      dev @1   test @1   test @5   test @20
+    chapter retrieved          20/20     8/12      10/12     10/12
+    source span                20/20    10/12      11/12     11/12
+    span + query localization  20/20    10/12      11/12     11/12
+    primary source span        20/20     9/12      11/12     11/12
+
+    chapter ranking, for comparison:  chapter retrieved 8/12 @1, 10/12 @5
+    partial quotations (span tier):   @1 2/3, @5 3/3
+    allusions (span tier):            @1 3/4, @5 3/4
 
 Regression cases, chapter rank -> span rank: Moroni 10 30 -> 2, Mosiah 12 3 -> 1 (credited
 to its second source, Exodus 20), 3 Nephi 20 1 -> 1, Mosiah 14 1 -> 1. The single-verse
@@ -151,7 +167,11 @@ quotation in Moroni 10:31 is the case the change exists for.
 
 Held out at the 0.90 threshold fixed in advance: 9 accepted, 7 true positives (6 of them
 primary), 0 control false positives, 2 accepted context pairs, precision 0.78, recall 0.58,
-false-positive rate 0.00 over 9 reviewed controls. The threshold remains untuned.
+false-positive rate 0.00 over 9 reviewed controls. The threshold remains untuned, and nine
+controls is not a reliable estimate of false-positive behaviour in general.
+
+Every labelled source carries its own family, and the split check validates all of them, so
+a secondary source cannot cross the dev/test boundary unnoticed.
 
 ## Output
 

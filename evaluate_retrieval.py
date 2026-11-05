@@ -191,6 +191,74 @@ def localization_metrics(rows, rank_field="span_rank"):
             "recall_at_5": at(5), "recall_at_20": at(20)}
 
 
+def resolve_targets(chapter_ranked, span_candidates, targets):
+    """Resolve every labelled source for one query chapter.
+
+    Each target keeps its own outcome: whether its chapter was retrieved by each
+    rule, and whether the matched evidence touches the annotated source span and
+    the annotated query span.
+    """
+    resolved = []
+    for target in targets:
+        book, chapter = parse_ref(target["ref"])
+        chapter_rank = next(
+            (rank for rank, row in enumerate(chapter_ranked, 1)
+             if (row["book"], row["chapter"]) == (book, chapter)),
+            None,
+        )
+        candidate = span_candidates.get((book, chapter))
+        resolved.append({
+            "target": target,
+            "chapter_rank": chapter_rank,
+            "span_rank": candidate["rank"] if candidate else None,
+            "span_hit": span_hit(candidate, target["span"]) if candidate else False,
+            "query_hit": query_span_hit(candidate, target["query_span"]) if candidate else False,
+            "candidate": candidate,
+        })
+    return resolved
+
+
+def summarise_targets(resolved):
+    """Four distinct outcomes, so a high rank alone can never earn credit.
+
+    span credit needs a span match; localization credit needs both a span match
+    and the query-side verses doing the quoting. The primary target is reported
+    separately so a secondary source cannot quietly stand in for it.
+    """
+    def minimum(predicate):
+        ranks = [row["span_rank"] for row in resolved
+                 if row["span_rank"] is not None and predicate(row)]
+        return min(ranks) if ranks else None
+
+    credited = sorted((row for row in resolved if row["span_hit"]),
+                      key=lambda row: row["span_rank"])
+    primary = next((row for row in resolved if row["target"]["primary"]), None)
+    chapter_ranks = [row["chapter_rank"] for row in resolved
+                     if row["chapter_rank"] is not None]
+
+    return {
+        "chapter_rank": min(chapter_ranks) if chapter_ranks else None,
+        "span_rank": minimum(lambda row: row["span_hit"]),
+        "localized_rank": minimum(lambda row: row["span_hit"] and row["query_hit"]),
+        "credited": credited[0] if credited else None,
+        "primary_chapter_rank": primary["chapter_rank"] if primary else None,
+        "primary_span_rank": minimum(
+            lambda row: primary is not None and row is primary and row["span_hit"]),
+        "primary_hit": primary["span_hit"] if primary else None,
+        "primary_query_hit": primary["query_hit"] if primary else None,
+    }
+
+
+def credited_by_span(row):
+    """Was the top hit a labelled source whose matched range touches its span?"""
+    top = row.get("top1")
+    intervals = row.get("top1_intervals") or []
+    for target in row.get("expected_targets", []):
+        if target["ref"] == top and span_hit({"source_intervals": intervals}, target["span"]):
+            return True
+    return False
+
+
 def threshold_metrics(rows, threshold):
     """Auto-accept every pair whose top hit scores at or above the threshold."""
     scored = [row for row in rows if row.get("top1_best") is not None]
@@ -198,9 +266,10 @@ def threshold_metrics(rows, threshold):
         return None
 
     accepted = [row for row in scored if row["top1_best"] >= threshold]
+    # a top hit earns credit only if it is a labelled source AND its matched
+    # evidence touches that source's annotated span
     true_positives = [row for row in accepted
-                      if row["kind"] in RETRIEVAL_KINDS
-                      and row.get("top1") in {t["ref"] for t in row.get("expected_targets", [])}]
+                      if row["kind"] in RETRIEVAL_KINDS and credited_by_span(row)]
     primary_matches = [row for row in accepted
                        if row["kind"] in RETRIEVAL_KINDS
                        and row.get("top1") == row.get("expected")]
@@ -240,36 +309,37 @@ def threshold_sweep(rows, step=0.02, low=0.60, high=1.00):
     return sweep
 
 
-def print_recall(title, rows, rank_field):
-    rule = rank_field.replace("_rank", "")
-    print(f"\n{title} — ranking: {rule}")
+SPAN_TIERS = (
+    ("chapter retrieved", "chapter_rank"),
+    ("source span", "span_rank"),
+    ("span + query spot", "localized_rank"),
+    ("primary source span", "primary_span_rank"),
+)
+CHAPTER_TIERS = (
+    ("chapter retrieved", "chapter_rank"),
+    ("primary chapter", "primary_chapter_rank"),
+)
+
+
+def print_recall(title, rows, tiers):
+    """One line per outcome tier, then per-kind at the source-span tier."""
+    print(f"\n{title}")
+    for label, rank_field in tiers:
+        overall = recall_metrics(rows, rank_field)
+        if not overall:
+            continue
+        print(f"  {label:<24} n={overall['pairs']:<3} "
+              f"@1={overall['recall_at_1']:.0%}  @5={overall['recall_at_5']:.0%}  "
+              f"@20={overall['recall_at_20']:.0%}")
+
     for kind in RETRIEVAL_KINDS:
         subset = [row for row in rows if row["kind"] == kind]
-        metrics = recall_metrics(subset, rank_field)
+        metrics = recall_metrics(subset, "span_rank")
         if not metrics:
             continue
-        span = span_recall_metrics(subset, rank_field)
-        assert span is not None
-        print(f"  {kind:<18} n={metrics['pairs']:<3} @1={metrics['recall_at_1']:.0%}  "
-              f"@5={metrics['recall_at_5']:.0%}  @20={metrics['recall_at_20']:.0%}  "
-              f"| span-hit @1={span['recall_at_1']:.0%} @5={span['recall_at_5']:.0%}")
-    overall = recall_metrics(rows, rank_field)
-    if overall:
-        span = span_recall_metrics(rows, rank_field)
-        local = localization_metrics(rows, rank_field)
-        assert span is not None and local is not None
-        print(f"  {'retrieval total':<18} n={overall['pairs']:<3} "
-              f"@1={overall['recall_at_1']:.0%}  @5={overall['recall_at_5']:.0%}  "
-              f"@20={overall['recall_at_20']:.0%}  "
-              f"| span-hit @1={span['recall_at_1']:.0%} @5={span['recall_at_5']:.0%} "
-              f"| query-span @1={local['recall_at_1']:.0%}")
-        primary_field = ("primary_chapter_rank" if rank_field.startswith("chapter")
-                         else "primary_span_rank")
-        primary = recall_metrics(rows, primary_field)
-        if primary:
-            print(f"  {'primary target only':<18} n={primary['pairs']:<3} "
-                  f"@1={primary['recall_at_1']:.0%}  @5={primary['recall_at_5']:.0%}  "
-                  f"@20={primary['recall_at_20']:.0%}")
+        print(f"  {kind:<24} n={metrics['pairs']:<3} "
+              f"@1={metrics['recall_at_1']:.0%}  @5={metrics['recall_at_5']:.0%}  "
+              f"@20={metrics['recall_at_20']:.0%}")
 
 
 def main(argv=None):
@@ -304,7 +374,8 @@ def main(argv=None):
     print(f"\nEvaluating {len(pairs)} labelled pairs against {len(meta)} windows "
           f"({reviewed} reviewed against the text, {len(pairs) - reviewed} not)")
     print(f"{'#':>3}  {'query':<12} {'kind':<18} {'split':<5} {'ch#':>4} {'sp#':>4} "
-          f"{'best':>7} {'sup':>3} {'src range':<10} {'span':<4}  {'top-1 (span rule)':<18}")
+          f"{'loc#':>4} {'best':>7} {'sup':>3} {'src range':<10} {'span':<4}  "
+          f"{'top-1 (span rule)':<18}")
 
     for number, pair in enumerate(pairs, 1):
         query_book, query_chapter = parse_ref(pair["query"])
@@ -323,39 +394,27 @@ def main(argv=None):
         span_ranked = rank_candidates(span_candidates, args.tie_tolerance)
 
         expected = pair["expected"]
-        targets = pair["expected_targets"]
-        chapter_rank = span_rank = None
-        primary_chapter_rank = primary_span_rank = None
-        chapter_row = span_row = None
-        source_hit = primary_hit = query_hit = None
-        hit_target = None
-
-        for target in targets:
-            target_book, target_chapter = parse_ref(target["ref"])
-
-            chapter_position = next(
-                (rank for rank, row in enumerate(chapter_ranked, 1)
-                 if (row["book"], row["chapter"]) == (target_book, target_chapter)),
-                None,
-            )
-            candidate = span_candidates.get((target_book, target_chapter))
-            position = candidate["rank"] if candidate else None
-            hit = span_hit(candidate, target["span"]) if candidate else None
-
-            if position is not None and (span_rank is None or position < span_rank):
-                span_rank, span_row, hit_target = position, candidate, target
-                source_hit = hit
-                query_hit = query_span_hit(candidate, target["query_span"])
-            if chapter_position is not None and (
-                    chapter_rank is None or chapter_position < chapter_rank):
-                chapter_rank, chapter_row = chapter_position, next(
-                    row for row in chapter_ranked
-                    if (row["book"], row["chapter"]) == (target_book, target_chapter))
-
-            if target["primary"]:
-                primary_chapter_rank = chapter_position
-                primary_span_rank = position
-                primary_hit = hit
+        resolved = resolve_targets(chapter_ranked, span_candidates,
+                                   pair["expected_targets"])
+        summary = summarise_targets(resolved)
+        chapter_rank = summary["chapter_rank"]
+        span_rank = summary["span_rank"]
+        localized_rank = summary["localized_rank"]
+        primary_chapter_rank = summary["primary_chapter_rank"]
+        primary_span_rank = summary["primary_span_rank"]
+        primary_hit = summary["primary_hit"]
+        credited = summary["credited"]
+        span_row = credited["candidate"] if credited else None
+        hit_target = credited["target"] if credited else None
+        source_hit = credited["span_hit"] if credited else None
+        query_hit = credited["query_hit"] if credited else None
+        credited_ref = credited["target"]["ref"] if credited else pair["expected"]
+        chapter_row = None
+        if credited_ref:
+            credited_book, credited_chapter = parse_ref(credited_ref)
+            chapter_row = next((row for row in chapter_ranked
+                                if (row["book"], row["chapter"]) ==
+                                (credited_book, credited_chapter)), None)
 
         top = span_ranked[0] if span_ranked else None
         top1 = f"{top['book']} {top['chapter']}" if top else None
@@ -371,19 +430,23 @@ def main(argv=None):
             "query_span": pair["query_span"],
             "expected_span": pair["expected_span"],
             "note": pair["note"],
-            "expected_targets": targets,
+            "expected_targets": pair["expected_targets"],
             "chapter_rank": chapter_rank,
             "chapter_best": chapter_row["best"] if chapter_row else None,
             "primary_chapter_rank": primary_chapter_rank,
             "primary_span_rank": primary_span_rank,
             "primary_span_hit": primary_hit,
+            "localized_rank": localized_rank,
+            "localized": localized_rank is not None,
             "hit_target": hit_target["ref"] if hit_target else None,
             "span_rank": span_rank,
             "span_best": span_row["best"] if span_row else None,
             "span_support": span_row["support"] if span_row else 0,
             "span_coverage": span_row["coverage"] if span_row else None,
             "source_range": span_row["source_range"] if span_row else None,
-            "source_pairs": span_row["pairs"][:10] if span_row else [],
+            "source_pairs": span_row["pairs"] if span_row else [],
+            "source_pairs_total": len(span_row["pairs"]) if span_row else 0,
+            "top1_intervals": (span_ranked[0].get("source_intervals") or []) if span_ranked else [],
             "query_range": span_row["query_range"] if span_row else None,
             "source_span_hit": source_hit,
             "query_span_hit": query_hit,
@@ -399,7 +462,8 @@ def main(argv=None):
         if hit_target and hit_target["ref"] != pair["expected"]:
             credit = f"  [credited: {hit_target['ref']}]"
         print(f"{number:>3}  {pair['query']:<12} {pair['kind']:<18} {pair['split']:<5} "
-              f"{str(chapter_rank or '-'):>4} {str(span_rank or '-'):>4} {best_text:>7} "
+              f"{str(chapter_rank or '-'):>4} {str(span_rank or '-'):>4} "
+              f"{str(localized_rank or '-'):>4} {best_text:>7} "
               f"{(span_row['support'] if span_row else 0):>3} "
               f"{(span_row['source_range'] if span_row else '-'):<10} {span_flag:<4}  "
               f"{(top1 or '-'):<18}{credit}")
@@ -407,10 +471,10 @@ def main(argv=None):
     dev = [row for row in results if row["split"] == "dev"]
     test = [row for row in results if row["split"] == "test"]
 
-    for rule in ("chapter", "span"):
-        print_recall("Recall — dev split (tuning data)", dev, f"{rule}_rank")
-    for rule in ("chapter", "span"):
-        print_recall("Recall — test split (held out)", test, f"{rule}_rank")
+    print_recall("Recall — dev split (tuning data) — chapter ranking", dev, CHAPTER_TIERS)
+    print_recall("Recall — dev split (tuning data) — span ranking", dev, SPAN_TIERS)
+    print_recall("Recall — test split (held out) — chapter ranking", test, CHAPTER_TIERS)
+    print_recall("Recall — test split (held out) — span ranking", test, SPAN_TIERS)
 
     print("\nRegression cases (chapter rank -> span rank)")
     by_query = {row["query"]: row for row in results}
