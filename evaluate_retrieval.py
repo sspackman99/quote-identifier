@@ -1,9 +1,13 @@
-"""Evaluate cross-corpus retrieval against a labelled set of quotation pairs.
+"""Evaluate cross-corpus retrieval against a labelled set of textual relationships.
 
 Builds ONE index over both corpora (or loads a cached one), then for every
 labelled pair ranks KJV chapters by how many of the query chapter's windows
-point at them. Reports recall@1/5/20 for quotations and paraphrases separately,
-and shows what the retriever returns for the unlabelled controls.
+point at them. Reports:
+
+  - recall@1/5/20 per relationship kind and per dev/test split
+  - a threshold sweep on the DEV split only (precision, recall, false-positive
+    rate), so the operating point is not chosen on the held-out data
+  - the held-out TEST split at a threshold fixed in advance (0.90)
 
 Usage:
     python evaluate_retrieval.py --cache-index .eval_cache
@@ -22,7 +26,6 @@ from pathlib import Path
 import numpy as np
 
 from chunking import build_chapter_token_stream, create_overlapping_windows
-from corpora import format_reference
 from evaluation_pairs import all_pairs
 from filtering import (
     build_ngram_document_frequencies,
@@ -37,6 +40,12 @@ WINDOW_OVERLAP = 15
 NGRAM_N = 3
 MIN_DOCUMENT_FREQUENCY = 0.20
 META_FIELDS = ("corpus", "book_id", "book", "chapter", "start_verse", "end_verse", "text")
+
+# Chosen before looking at the held-out split: high-confidence accept line for a
+# verbatim-looking top hit. Not tuned on test data.
+HELD_OUT_THRESHOLD = 0.90
+
+POSITIVE_KINDS = ("quotation", "partial_quotation", "paraphrase", "allusion")
 
 
 def build_windows(bom_path, kjv_path):
@@ -135,6 +144,84 @@ def parse_ref(text):
     return book, int(chapter)
 
 
+def recall_metrics(rows):
+    """Recall@1/5/20 over positive rows (rows without an expected chapter are skipped)."""
+    positives = [row for row in rows if row["expected"]]
+    if not positives:
+        return None
+
+    def at(k):
+        return sum(1 for row in positives
+                   if row["expected_rank"] and row["expected_rank"] <= k) / len(positives)
+
+    return {
+        "pairs": len(positives),
+        "recall_at_1": at(1),
+        "recall_at_5": at(5),
+        "recall_at_20": at(20),
+        "missed": [row["query"] for row in positives if not row["expected_rank"]],
+    }
+
+
+def threshold_metrics(rows, threshold):
+    """Auto-accept every pair whose top hit scores at or above the threshold.
+
+    tp  accepted AND the top hit is the labelled source chapter
+    fp  accepted but wrong (a control, or a positive whose top hit is elsewhere)
+    """
+    if not any(row["top1_best"] is not None for row in rows):
+        return None
+
+    accepted = [row for row in rows
+                if row["top1_best"] is not None and row["top1_best"] >= threshold]
+    true_positives = [row for row in accepted
+                      if row["expected"] and row["top1"] == row["expected"]]
+    false_positives = [row for row in accepted if row not in true_positives]
+
+    positives = [row for row in rows if row["expected"]]
+    controls = [row for row in rows if not row["expected"]]
+
+    return {
+        "threshold": round(threshold, 3),
+        "accepted": len(accepted),
+        "true_positives": len(true_positives),
+        "false_positives": len(false_positives),
+        "precision": (len(true_positives) / len(accepted)) if accepted else None,
+        "recall": (len(true_positives) / len(positives)) if positives else None,
+        "false_positive_rate": (
+            len([row for row in accepted if not row["expected"]]) / len(controls)
+            if controls else None
+        ),
+    }
+
+
+def threshold_sweep(rows, step=0.02, low=0.60, high=1.00):
+    sweep = []
+    threshold = low
+    while threshold <= high + 1e-9:
+        metrics = threshold_metrics(rows, threshold)
+        if metrics:
+            sweep.append(metrics)
+        threshold = round(threshold + step, 4)
+    return sweep
+
+
+def print_recall(title, rows):
+    print(f"\n{title}")
+    for kind in POSITIVE_KINDS:
+        metrics = recall_metrics([row for row in rows if row["kind"] == kind])
+        if not metrics:
+            continue
+        print(f"  {kind:<18} n={metrics['pairs']:<3} @1={metrics['recall_at_1']:.0%}  "
+              f"@5={metrics['recall_at_5']:.0%}  @20={metrics['recall_at_20']:.0%}"
+              + (f"  misses={metrics['missed']}" if metrics["missed"] else ""))
+    overall = recall_metrics(rows)
+    if overall:
+        print(f"  {'all positives':<18} n={overall['pairs']:<3} "
+              f"@1={overall['recall_at_1']:.0%}  @5={overall['recall_at_5']:.0%}  "
+              f"@20={overall['recall_at_20']:.0%}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bom", default="data/bom.txt")
@@ -156,8 +243,8 @@ def main(argv=None):
     results = []
 
     print(f"\nEvaluating {len(pairs)} labelled pairs against {len(meta)} windows\n")
-    print(f"{'#':>3}  {'query':<14} {'expected':<13} {'kind':<11} {'rank':>5} "
-          f"{'hits':>5} {'best':>7}  {'top-1':<18}")
+    print(f"{'#':>3}  {'query':<14} {'expected':<16} {'kind':<18} {'split':<5} "
+          f"{'rank':>5} {'hits':>5} {'best':>7}  {'top-1':<18}")
 
     for number, pair in enumerate(pairs, 1):
         query_book, query_chapter = parse_ref(pair["query"])
@@ -181,6 +268,9 @@ def main(argv=None):
             "query": pair["query"],
             "expected": expected,
             "kind": pair["kind"],
+            "split": pair["split"],
+            "confidence": pair.get("confidence", "high"),
+            "note": pair.get("note", ""),
             "query_windows": query_windows,
             "expected_rank": expected_rank,
             "expected_hits": expected_row["hits"] if expected_row else 0,
@@ -190,44 +280,48 @@ def main(argv=None):
             "chapters_retrieved": len(ranked),
         })
 
-        expected_hits = expected_row["hits"] if expected_row else 0
-        expected_best = f"{expected_row['best']:.4f}" if expected_row else "-"
         rank_text = str(expected_rank) if expected_rank else "-"
+        hits_text = expected_row["hits"] if expected_row else 0
+        best_text = f"{expected_row['best']:.4f}" if expected_row else "-"
 
-        print(f"{number:>3}  {pair['query']:<14} {(expected or '-'):<13} {pair['kind']:<11} "
-              f"{rank_text:>5} {expected_hits:>5} {expected_best:>7}  "
+        print(f"{number:>3}  {pair['query']:<14} {(expected or '-'):<16} {pair['kind']:<18} "
+              f"{pair['split']:<5} {rank_text:>5} {hits_text:>5} {best_text:>7}  "
               f"{(results[-1]['top1'] or '-'):<18}")
 
-    # aggregate
-    summary = {}
-    for kind in ("quotation", "paraphrase"):
-        rows = [row for row in results if row["kind"] == kind and row["expected"]]
-        if not rows:
-            continue
-        summary[kind] = {
-            "pairs": len(rows),
-            "recall_at_1": sum(1 for row in rows if row["expected_rank"] == 1) / len(rows),
-            "recall_at_5": sum(1 for row in rows
-                               if row["expected_rank"] and row["expected_rank"] <= 5) / len(rows),
-            "recall_at_20": sum(1 for row in rows
-                                if row["expected_rank"] and row["expected_rank"] <= 20) / len(rows),
-            "missed": [row["query"] for row in rows if not row["expected_rank"]],
-        }
+    dev = [row for row in results if row["split"] == "dev"]
+    test = [row for row in results if row["split"] == "test"]
 
-    print("\nRecall by kind")
-    for kind, values in summary.items():
-        print(f"  {kind:<11} n={values['pairs']:<3} "
-              f"@1={values['recall_at_1']:.0%}  @5={values['recall_at_5']:.0%}  "
-              f"@20={values['recall_at_20']:.0%}"
-              + (f"  misses={values['missed']}" if values["missed"] else ""))
+    print_recall("Recall — dev split (tuning data)", dev)
+    print_recall("Recall — test split (held out)", test)
 
-    controls = [row for row in results if row["kind"] == "control"]
-    if controls:
-        print("\nControls (no KJV source; showing what was returned anyway)")
-        for row in controls:
-            best = row["top1_best"]
-            print(f"  {row['query']:<12} top-1 {row['top1']:<16} "
-                  f"best {best:.4f}  chapters hit {row['chapters_retrieved']}")
+    sweep_rows = threshold_sweep(dev)
+    if sweep_rows:
+        print(f"\nThreshold sweep on DEV only ({len(sweep_rows)} points)")
+        print(f"  {'thresh':>6} {'accept':>6} {'tp':>4} {'fp':>4} {'prec':>6} {'rec':>5} {'fpr':>6}")
+        for row in sweep_rows:
+            if row["accepted"] == 0:
+                continue
+            precision = "-" if row["precision"] is None else f"{row['precision']:.2f}"
+            recall = "-" if row["recall"] is None else f"{row['recall']:.2f}"
+            fpr = "-" if row["false_positive_rate"] is None else f"{row['false_positive_rate']:.2f}"
+            print(f"  {row['threshold']:>6.2f} {row['accepted']:>6} {row['true_positives']:>4} "
+                  f"{row['false_positives']:>4} {precision:>6} {recall:>5} {fpr:>6}")
+
+    held_out = threshold_metrics(test, HELD_OUT_THRESHOLD)
+    if held_out:
+        print(f"\nHeld-out TEST split at the threshold fixed in advance "
+              f"({HELD_OUT_THRESHOLD:.2f}):")
+        print(f"  accepted {held_out['accepted']} of {len(test)} | tp {held_out['true_positives']} "
+              f"| fp {held_out['false_positives']} | precision {held_out['precision']:.2f} "
+              f"| recall {held_out['recall']:.2f} "
+              f"| fpr {held_out['false_positive_rate']:.2f}")
+
+    control_rows = [row for row in results if not row["expected"]]
+    if control_rows:
+        print("\nControls (no KJV source; what came back anyway)")
+        for row in control_rows:
+            print(f"  {row['query']:<12} [{row['kind']:<14}] top-1 {row['top1']:<17} "
+                  f"best {row['top1_best']:.4f}  chapters hit {row['chapters_retrieved']}")
 
     if args.json:
         payload = {
@@ -236,9 +330,17 @@ def main(argv=None):
             "window_size": WINDOW_SIZE,
             "window_overlap": WINDOW_OVERLAP,
             "min_document_frequency": MIN_DOCUMENT_FREQUENCY,
+            "held_out_threshold": HELD_OUT_THRESHOLD,
             "results": results,
-            "recall": summary,
-            "controls": controls,
+            "recall": {
+                "dev": recall_metrics(dev),
+                "test": recall_metrics(test),
+                "by_kind": {kind: recall_metrics([row for row in results
+                                                  if row["kind"] == kind])
+                            for kind in POSITIVE_KINDS},
+            },
+            "threshold_sweep_dev": sweep_rows,
+            "held_out_test": held_out,
         }
         Path(args.json).write_text(json.dumps(payload, indent=2) + "\n")
         print(f"\nJSON written to {args.json}")

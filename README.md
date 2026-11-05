@@ -72,10 +72,22 @@ boilerplate. MinHash is not used here: this stage is about embedding retrieval.
 ### Retrieval evaluation
 
 `evaluate_retrieval.py` scores the retriever against a labelled set
-(`evaluation_pairs.py`): 21 quotation pairs (1 Nephi 20-21, 2 Nephi 7-8, 2 Nephi 12-24,
-Mosiah 14, 3 Nephi 22, 3 Nephi 24-25 against their Isaiah/Malachi sources), 3 paraphrase
-pairs (3 Nephi 12-14 against Matthew 5-7) and 3 controls with no KJV source (Alma 43,
-Ether 1, Moroni 9).
+(`evaluation_pairs.py`), by kind:
+
+  quotation          21 pairs: 1 Nephi 20-21, 2 Nephi 7-8, 2 Nephi 12-24, Mosiah 14,
+                     3 Nephi 22, 3 Nephi 24-25 against their Isaiah/Malachi sources
+  partial_quotation   2 pairs where only a few verses are quoted (Mosiah 12, 3 Nephi 20)
+  paraphrase          4 pairs: 3 Nephi 12-14 against Matthew 5-7, Moroni 7 against
+                     1 Corinthians 13
+  allusion            3 low-confidence pairs where dependence is thematic, not textual
+  shared_phrases      4 controls with KJV-shaped vocabulary and no source chapter
+  unrelated           8 controls with no KJV source at all
+
+Every pair is deterministically assigned to a `dev` or held-out `test` split from its
+query string, so the split survives edits. Thresholds are swept on dev only; the test
+split is reported at a threshold fixed in advance (0.90), with precision, recall and
+false-positive rate — a control accepted above the threshold counts as a false positive,
+which is the measurement that matters for auto-accept.
 
     QI_EMBEDDINGS_URL=http://10.77.1.117:8001/v1/embeddings \
     QI_EMBEDDINGS_MODEL=embeddinggemma-300m \
@@ -83,9 +95,7 @@ Ether 1, Moroni 9).
 
 It builds one pooled index (cached in `.eval_cache/` after the first run, so re-scoring
 is seconds rather than minutes), ranks KJV chapters for each query chapter by window
-hits, and reports recall@1/5/20 for quotations and paraphrases separately, plus what the
-controls returned — a control that lands on a chapter with a high score is false-positive
-pressure worth seeing.
+hits, and prints per-kind recall, the dev threshold sweep, and the held-out result.
 
 ## Output
 
