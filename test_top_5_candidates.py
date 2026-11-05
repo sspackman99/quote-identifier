@@ -4,6 +4,23 @@ import pytest
 import numpy as np
 
 
+def build_faiss_index(windows):
+    """Build a FAISS inner-product index over pre-computed window embeddings.
+
+    Kept local to the tests on purpose: similarity.py imports
+    sentence_transformers/torch/sklearn/datasketch at module level, so importing
+    it here would make this suite require the full ML stack even though the
+    tests only supply numpy embeddings and need faiss.
+    """
+    import faiss
+
+    dim = len(windows[0]["embedding"])
+    index = faiss.IndexFlatIP(dim)
+    embeddings = np.array([w["embedding"] for w in windows]).astype("float32")
+    index.add(embeddings)
+    return index, embeddings
+
+
 def create_test_windows():
     """Create deterministic test windows with known embeddings."""
     # Create 10 test windows with simple 2D embeddings
@@ -27,7 +44,6 @@ def create_test_windows():
 def test_find_top_5_embedding_candidates_basic():
     """Test basic functionality: returns up to 5 candidates per source."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     windows, emb_dim = create_test_windows()
     index, embeddings = build_faiss_index(windows)
@@ -48,23 +64,81 @@ def test_find_top_5_embedding_candidates_basic():
 def test_candidate_rank_is_deterministic():
     """Test that candidate_rank is 1-5 and deterministic."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     windows, emb_dim = create_test_windows()
     index, embeddings = build_faiss_index(windows)
     
     candidates = find_top_5_embedding_candidates(windows, index, embeddings)
     
-    # Verify ranks are 1-5
+    # Verify ranks are exactly 1..5 for every source, and stable across runs
+    by_source = {}
     for c in candidates:
-        assert c["candidate_rank"] in [1, 2, 3, 4, 5]
-        assert c["candidate_rank"] == 1 if c["cosine_similarity"] > 0.9 else c["candidate_rank"] <= 5
+        by_source.setdefault(c["source_window_id"], []).append(c)
+
+    assert len(by_source) == 10, "every source window must produce candidates"
+    for source_id, records in by_source.items():
+        assert [r["candidate_rank"] for r in records] == [1, 2, 3, 4, 5], \
+            f"source {source_id} ranks are {[r['candidate_rank'] for r in records]}"
+
+    again = find_top_5_embedding_candidates(windows, index, embeddings)
+    assert again == candidates, "candidate output must be deterministic"
+
+
+def test_cosine_similarity_is_true_inner_product():
+    """cosine_similarity must equal the normalized dot product, never negated."""
+    from top_5_candidates import find_top_5_embedding_candidates
+
+    windows, emb_dim = create_test_windows()
+    index, embeddings = build_faiss_index(windows)
+
+    candidates = find_top_5_embedding_candidates(windows, index, embeddings)
+
+    for c in candidates:
+        expected = float(np.dot(embeddings[c["source_window_id"]],
+                                embeddings[c["candidate_window_id"]]))
+        assert c["cosine_similarity"] == pytest.approx(expected, abs=1e-5), \
+            f"source {c['source_window_id']} -> candidate {c['candidate_window_id']}"
+
+
+def test_near_overlap_exclusion_does_not_reduce_candidate_count():
+    """Dropping a near-overlap must be backfilled so the source still gets 5."""
+    from top_5_candidates import find_top_5_embedding_candidates
+
+    def window(book, chapter, token_index, embedding):
+        return {
+            "book": book,
+            "chapter": chapter,
+            "start_verse": 1,
+            "end_verse": 3,
+            "start_token_index": token_index,
+            "text": f"{book} {chapter} @{token_index}",
+            "filtered_text": f"{book} {chapter} @{token_index}",
+            "filtered_tokens": ["token"] * 30,
+            "embedding": np.array(embedding, dtype=np.float32),
+        }
+
+    # Source 0 and window 1 are a near-overlap pair (same book+chapter, 50 tokens apart)
+    # and window 1 is the most similar candidate, so it must be skipped AND replaced.
+    windows = [
+        window("Genesis", 1, 0, [1.0, 0.0]),
+        window("Genesis", 1, 50, [1.0, 0.0]),
+    ]
+    for n in range(1, 7):
+        magnitude = (1.0 - n * 0.1) ** 0.5
+        windows.append(window(f"Book{n}", 1, 10_000 * n, [magnitude, (1.0 - magnitude ** 2) ** 0.5]))
+
+    index, embeddings = build_faiss_index(windows)
+    candidates = find_top_5_embedding_candidates(windows, index, embeddings)
+
+    source_0 = [c for c in candidates if c["source_window_id"] == 0]
+    assert len(source_0) == 5, f"expected 5 backfilled candidates, got {len(source_0)}"
+    assert 1 not in [c["candidate_window_id"] for c in source_0], "near-overlap was not excluded"
+    assert [c["candidate_rank"] for c in source_0] == [1, 2, 3, 4, 5]
 
 
 def test_cosine_similarity_values():
     """Test that cosine_similarity values are in valid range [0, 1]."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     windows, emb_dim = create_test_windows()
     index, embeddings = build_faiss_index(windows)
@@ -78,7 +152,6 @@ def test_cosine_similarity_values():
 def test_self_match_excluded():
     """Test that a window never appears as its own candidate."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     windows, emb_dim = create_test_windows()
     index, embeddings = build_faiss_index(windows)
@@ -93,7 +166,6 @@ def test_self_match_excluded():
 def test_near_overlap_excluded():
     """Test that near-overlap matches (same book+chapter, within 200 tokens) are excluded."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     # Create windows that are near-overlaps
     windows = [
@@ -150,7 +222,6 @@ def test_near_overlap_excluded():
 def test_candidates_have_required_fields():
     """Test that candidate records contain all required fields."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     windows, emb_dim = create_test_windows()
     index, embeddings = build_faiss_index(windows)
@@ -171,10 +242,9 @@ def test_candidates_have_required_fields():
             assert field in c, f"Missing field: {field}"
 
 
-def test_export_to_csv():
+def test_export_to_csv(tmp_path):
     """Test CSV export functionality."""
     from top_5_candidates import find_top_5_embedding_candidates, export_top_5_candidates_to_csv
-    from similarity import build_faiss_index
     import csv
     import os
     
@@ -184,7 +254,8 @@ def test_export_to_csv():
     candidates = find_top_5_embedding_candidates(windows, index, embeddings)
     
     # Export to CSV
-    csv_path = "/home/momo/work/quote-identifier/.worktrees/t_ffd5b322/test_candidates_output.csv"
+    csv_path = str(tmp_path / "test_candidates_output.csv")
+
     export_top_5_candidates_to_csv(candidates, csv_path)
     
     # Verify CSV was created and has correct structure
@@ -193,14 +264,15 @@ def test_export_to_csv():
         reader = csv.DictReader(f)
         rows = list(reader)
         assert len(rows) == len(candidates)
-        assert "source_window_id" in reader.fieldnames or reader.fieldnames[0] == "source_window_id"
-        assert "cosine_similarity" in reader.fieldnames or "cosine_similarity" in reader.fieldnames
+        assert reader.fieldnames[0] == "source_window_id"
+        assert reader.fieldnames[-1] == "cosine_similarity"
+        float(rows[0]["cosine_similarity"])  # parses as a number
+
 
 
 def test_ranking_is_by_descending_cosine_similarity():
     """Test that candidates are ranked by descending cosine similarity."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     windows, emb_dim = create_test_windows()
     index, embeddings = build_faiss_index(windows)
@@ -227,7 +299,6 @@ def test_ranking_is_by_descending_cosine_similarity():
 def test_tie_breaking_by_window_index():
     """Test that ties are broken by ascending window index."""
     from top_5_candidates import find_top_5_embedding_candidates
-    from similarity import build_faiss_index
     
     # Create windows with identical embeddings
     windows = [
