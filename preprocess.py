@@ -195,6 +195,7 @@ _BOOK_TITLES = {
     "ENOS": "Enos",
     "JAROM": "Jarom",
     "OMNI": "Omni",
+    "WORDS OF MORMON": "Words of Mormon",
     "MOSIAH": "Mosiah",
     "ALMA": "Alma",
     "HELAMAN": "Helaman",

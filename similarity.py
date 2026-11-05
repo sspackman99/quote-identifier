@@ -210,6 +210,25 @@ def score_match(window1, window2):
     return final_score
 
 
+def merge_duplicate_matches(matches):
+    """Collapse candidate triples into one record per unordered pair.
+
+    The embedding and MinHash pipelines each report a pair, and each reports it
+    in both directions (i->j and j->i), so the same pair can arrive four times.
+    Each surviving record keeps every method that found it — no information is
+    lost — and the pair is ordered (min, max) so the output is stable.
+    """
+    merged = {}
+
+    for i, j, method in matches:
+        if i == j:
+            continue
+        key = (i, j) if i < j else (j, i)
+        merged.setdefault(key, set()).add(method)
+
+    return [(i, j, sorted(methods)) for (i, j), methods in sorted(merged.items())]
+
+
 def filter_nearby_matches(windows, matches, min_token_distance=200):
     filtered = []
     for i, j, source in matches:

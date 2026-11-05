@@ -28,6 +28,21 @@ One index must be built from ONE embedding model. Mixing vectors from different 
 (e.g. `all-mpnet-base-v2` locally and `embeddinggemma-300m` from a server) inside a
 single run is meaningless, so pick one per run.
 
+## Output
+
+`top_matches.csv` holds the highest-scoring candidate pairs:
+
+    score, methods, text_1, book_1, chapter_1, start_verse_1, end_verse_1,
+    text_2, book_2, chapter_2, start_verse_2, end_verse_2
+
+`methods` lists every retriever that found the pair (`embedding`, `minhash`). Each pair
+appears once: the two retrievers and both directions (A->B, B->A) are collapsed into one
+row. `--no-dedupe` restores the raw per-method, per-direction rows.
+
+Candidate pairs are still window pairs, and windows overlap, so the same passage pair can
+legitimately appear more than once with different verse spans. Collapsing those belongs
+with context expansion, where a span means something.
+
 ## Tests
 
     python -m pytest -q

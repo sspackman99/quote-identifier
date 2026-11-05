@@ -252,3 +252,46 @@ def test_cli_exits_2_with_clear_message_when_corpus_is_missing(tmp_path):
     assert result.returncode == 2
     assert "absent.txt" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_words_of_mormon_title_is_its_own_single_chapter_book():
+    text = """Omni Chapter 1
+1:30 last omni verse
+ THE WORDS OF MORMON
+1:1 and now i mormon being about to deliver up the record
+1:18 and it came to pass that after king benjamin had made an end
+ THE BOOK OF MOSIAH
+Mosiah Chapter 1
+1:1 and now there was no more contention
+"""
+    verses = parse_scripture_text(text)
+
+    assert [(v["book"], v["chapter"], v["verse"]) for v in verses] == [
+        ("Omni", 1, "1:30"),
+        ("Words of Mormon", 1, "1:1"),
+        ("Words of Mormon", 1, "1:18"),
+        ("Mosiah", 1, "1:1"),
+    ]
+
+
+def test_real_corpus_book_and_verse_counts_match_the_source():
+    """Per-book counts, verified against an independent region scan of the file.
+
+    Any book silently folded into a neighbour changes both its own count and the
+    neighbour's, which this table catches.
+    """
+    path = _real_bom()
+    verses = preprocess_bom(str(path))
+
+    expected = {
+        "1 Nephi": 617, "2 Nephi": 779, "Jacob": 203, "Enos": 27, "Jarom": 15,
+        "Omni": 30, "Words of Mormon": 18, "Mosiah": 785, "Alma": 1973,
+        "Helaman": 496, "3 Nephi": 783, "4 Nephi": 49, "Mormon": 227,
+        "Ether": 433, "Moroni": 163,
+    }
+
+    counts = {}
+    for verse in verses:
+        counts[verse["book"]] = counts.get(verse["book"], 0) + 1
+
+    assert counts == expected

@@ -30,6 +30,7 @@ from similarity import (
     find_embedding_matches,
     find_minhash_matches,
     get_top_matches,
+    merge_duplicate_matches,
 )
 
 WINDOW_SIZE = 30
@@ -37,7 +38,7 @@ WINDOW_OVERLAP = 15
 TOP_N = 750
 
 
-def run(corpus_path, output_path="top_matches.csv"):
+def run(corpus_path, output_path="top_matches.csv", dedupe=True):
     """Run the full pipeline and write the scored matches to a CSV."""
     # --------------------------------------------
     # 1. PREPROCESS
@@ -100,6 +101,10 @@ def run(corpus_path, output_path="top_matches.csv"):
     # --------------------------------------------
     all_matches = minhash_matches + embedding_matches
 
+    if dedupe:
+        all_matches = merge_duplicate_matches(all_matches)
+        print(f"Unique candidate pairs: {len(all_matches)}")
+
     print("Filtering nearby trivial matches...")
     filtered_matches = filter_nearby_matches(
         windows,
@@ -120,10 +125,11 @@ def run(corpus_path, output_path="top_matches.csv"):
     for score, i, j, method in top_matches:
         w1 = windows[i]
         w2 = windows[j]
+        methods = method if isinstance(method, str) else ",".join(sorted(method))
 
         rows.append({
             "score": score,
-            "method": method,
+            "methods": methods,
             "text_1": w1["text"],
             "book_1": w1["book"],
             "chapter_1": w1["chapter"],
@@ -155,6 +161,12 @@ def main(argv=None):
         default="top_matches.csv",
         help="CSV file to write (default: top_matches.csv)",
     )
+    parser.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="keep duplicate pair records (both directions, one per method) instead of "
+             "collapsing each pair to one row",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -163,7 +175,7 @@ def main(argv=None):
         parser.exit(2, f"{parser.prog}: error: {exc}\n")
 
     print(f"Corpus: {corpus_path}")
-    run(corpus_path, args.output)
+    run(corpus_path, args.output, dedupe=not args.no_dedupe)
     return 0
 
 
