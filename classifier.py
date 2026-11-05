@@ -37,6 +37,7 @@ RELATIONSHIPS = (
 # Relationships that assert textual dependence; the rest do not.
 DEPENDENT = ("quotation", "partial_quotation", "paraphrase", "allusion", "interpretation")
 
+RUBRIC_VERSION = "1.0"
 MATCHED_WINDOW_LIMIT = 8
 DEFAULT_MODEL = "local-classifier"
 DEFAULT_TIMEOUT = 180  # this model can take a while to think
@@ -45,24 +46,56 @@ CONTRADICTION_SIMILARITY = 0.85
 
 SYSTEM_PROMPT = """You classify the relationship between two scriptural passages.
 
-Answer with ONE of these labels:
+Rubric version 1.0. Answer with ONE of these labels:
 
-- quotation: the query reproduces the source substantially verbatim, at length.
-- partial_quotation: the query reproduces a shorter run of the source verbatim.
-- paraphrase: the query restates the source's statement or idea in different words.
-- allusion: the query echoes or evokes the source without restating it closely.
-- interpretation: the query explains, applies or comments on the source.
-- shared_vocabulary: similar wording, but no evidence that one depends on the other.
-- unrelated: no meaningful relationship.
+- quotation: the query reproduces a substantial, continuous portion of the source, with
+  wording substantially preserved. Key test: is it essentially a direct quotation?
+- partial_quotation: a shorter, continuous, substantially verbatim excerpt from a larger
+  source passage. Key test: is the wording directly reproduced, but only a portion?
+- paraphrase: the source's substantive proposition is restated in different wording,
+  without merely explaining its implications. Key test: same assertion, other words?
+- allusion: an identifiable reference through distinctive language, imagery, structure or a
+  recognizable combination of ideas, without reproducing or restating enough to be a
+  quotation or paraphrase. Key test: is the source being evoked rather than restated?
+- interpretation: the passage explains, applies, expands, draws an inference from, or
+  develops the meaning of another passage. Key test: is it explaining what the source means
+  or implies, rather than restating what it says?
+- shared_vocabulary: similar words or conventional expressions, with no persuasive evidence
+  of a specific textual relationship. Key test: could this similarity occur independently?
+- unrelated: no meaningful textual relationship is supported.
+
+Boundaries that decide most cases:
+
+1. Quotation versus partial_quotation is about the EXTENT of the reproduced text, not its
+   importance. A short but exact quotation is partial_quotation even when it is the most
+   memorable line in the source. There is no verse-count rule: one verse can carry a
+   substantial quotation, several verses can carry only a short excerpt. Judge the
+   continuous wording actually reproduced. Example: two verses lifted exactly out of a long
+   chapter = partial_quotation; the whole servant song reproduced in order = quotation.
+2. Paraphrase versus interpretation is about the RELATION between the statements.
+   Paraphrase says substantially the same thing in different words. Interpretation
+   explains, applies or draws conclusions from it. Example: a description of charity
+   reworded = paraphrase; an explanation of who the servant in the source is, quoting a
+   phrase or two = interpretation.
+3. Allusion versus shared_vocabulary: an allusion evokes a specific passage through
+   distinctive imagery or structure; shared_vocabulary is language that any text in this
+   tradition could carry independently. Example: a plea to turn away divine anger modelled
+   on a specific psalm = allusion; a general legal principle about individual
+   responsibility = shared_vocabulary.
+4. A passage may quote inside an explanation. If the explanation dominates, answer
+   interpretation and record the embedded quotation as secondary; if the quoted block
+   dominates, answer quotation or partial_quotation and record the comment as secondary.
+5. A passage may relate to more than one source. Judge the pair you are given, against its
+   own verses, and do not let a second relationship dilute the answer.
 
 How to decide:
 1. The MATCHED evidence below is the only thing that can support quotation or
    partial_quotation. Quote from it when you claim verbatim reuse.
-2. SURROUNDING CONTEXT is provided to help you understand both passages. Similarity
-   that exists only in the surrounding context is never a quotation.
-3. A high similarity score on its own is not evidence of dependence. Two passages can
-   share idiom, covenant formula or prayer language without either drawing on the other.
-4. If the query extends or explains the source, prefer interpretation over paraphrase.
+2. SURROUNDING CONTEXT is provided to help you understand both passages. Similarity that
+   exists only in the surrounding context is never a quotation.
+3. A high similarity score is not by itself evidence of dependence.
+4. When two relationships both apply, choose the dominant one and name the secondary one
+   in the explanation. Do not force artificial certainty.
 5. If the evidence is genuinely ambiguous, still choose the best label AND set
    needs_review to true. Do not inflate confidence to seem decisive.
 
@@ -71,8 +104,9 @@ Return JSON only, with no prose around it:
 {
   "relationship": "<one label above>",
   "confidence": <0.0 to 1.0>,
-  "query_span": "<verses in the query passage that carry the relationship>",
-  "source_span": "<verses in the source passage being used>",
+  "query_span": "<verses in the query carrying the relationship>",
+  "source_span": "<verses in the source being used>",
+  "secondary_relationship": "<another label, or \"\" if none>",
   "explanation": "<one or two sentences>",
   "evidence": ["<short quoted phrases from the MATCHED evidence>", "..."],
   "needs_review": <true or false>
@@ -243,8 +277,17 @@ def parse_response(text):
             f"{relationship} was claimed without any evidence quoted from the match"
         )
 
+    secondary = str(payload.get("secondary_relationship", "") or "").strip().lower().replace(" ", "_")
+    if secondary and secondary not in RELATIONSHIPS:
+        raise ClassifierResponseError(
+            f"secondary_relationship {secondary!r} is not in the taxonomy"
+        )
+    if secondary == relationship:
+        secondary = ""
+
     return {
         "relationship": relationship,
+        "secondary_relationship": secondary,
         "confidence": round(confidence, 4),
         "query_span": str(payload.get("query_span", "")).strip(),
         "source_span": str(payload.get("source_span", "")).strip(),
@@ -292,6 +335,7 @@ class RelationshipClassifier:
         response = self._complete(SYSTEM_PROMPT, render_prompt(case))
         result = parse_response(response)
         result["model"] = self.model
+        result["rubric_version"] = RUBRIC_VERSION
         result["matched_windows"] = case["matched_windows"]
         result["matched_total"] = case.get("matched_total", len(case["matched_windows"]))
         result["matched_truncated"] = case.get("matched_truncated", False)

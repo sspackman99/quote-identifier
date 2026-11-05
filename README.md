@@ -176,6 +176,20 @@ primary), 0 control false positives, 2 accepted context pairs, precision 0.78, r
 false-positive rate 0.00 over 8 reviewed controls. The threshold remains untuned, and eight
 controls is not a reliable estimate of false-positive behaviour in general.
 
+## Classification rubric
+
+`RUBRIC.md` is the authority for what each of the seven labels means: version 1.0,
+with the two distinctions that decide borderline cases (extent of reproduction decides
+quotation versus partial quotation; the relation between statements decides paraphrase
+versus interpretation) and a worked example for each boundary the classifier prompt
+teaches. The version is written into every classification result and into the
+evaluation JSON, because results under different rubrics are not comparable.
+
+Relabelling is a version bump plus a re-label pass, never an edit in place: affected
+pairs keep their previous label in `label_history` with the reason, and a pair may carry
+a `secondary_relationship` when two relationships both apply (Mosiah 15 and Alma 42 are
+interpretations with an embedded partial quotation).
+
 ## Classification stage
 
 Retrieval answers "these two passages look alike". `classifier.py` answers "what kind
@@ -249,11 +263,15 @@ partial quotation, which this model treats as one category, and (b) paraphrase a
 interpretation, which it tends to promote to quotation when the wording really is
 close.
 
-Two of those look like label errors rather than classifier errors, and they are the
-most useful thing the run produced: 3 Nephi 13 and 14 reproduce Matthew 6 and 7
-closely, and Mosiah 15 and Alma 42 reuse Isaiah 53 and Genesis 3:24 wording, yet all
-four are labelled paraphrase or interpretation. A rubric is needed before this number
-means anything: at what point does reused wording stop being a quotation?
+Two of those turned out to be label errors rather than classifier errors, and they
+were the most useful thing the run produced. Under rubric 1.0 the labels moved: 3 Nephi
+12, 13 and 14 are `quotation` (49%, 84% and 86% of the source's four-word sequences
+reproduced), with the old `paraphrase` label preserved in `label_history`; Mosiah 15 and
+Alma 42 stay `interpretation` with `partial_quotation` recorded as the secondary
+relationship, because the exposition dominates and only a phrase is quoted.
+
+This section reports the pre-1.0 run. The v1.0 run against the relabelled set is
+reported below it once it completes.
 
 The single review flag was a genuine error the policy caught: with the wrong query
 verses in the prompt (see below) the model called Mosiah 12 -> Exodus 20 `unrelated`

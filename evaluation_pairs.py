@@ -133,12 +133,26 @@ PAIRS = [
              "'put on thy beautiful garments')"},
 
     # ---- paraphrases ------------------------------------------------------
-    {"query": "3 Nephi 12", "expected": "Matthew 5", "kind": "paraphrase",
-     "family": "matthew-5-7", "confidence": "high"},
-    {"query": "3 Nephi 13", "expected": "Matthew 6", "kind": "paraphrase",
-     "family": "matthew-5-7", "confidence": "high"},
-    {"query": "3 Nephi 14", "expected": "Matthew 7", "kind": "paraphrase",
-     "family": "matthew-5-7", "confidence": "high"},
+    # rubric 1.0: these reproduce Matthew substantially, so they are quotations.
+    # The earlier "paraphrase" label is kept in label_history rather than overwritten.
+    {"query": "3 Nephi 12", "expected": "Matthew 5", "kind": "quotation",
+     "family": "matthew-5-7", "confidence": "medium", "reviewed": True,
+     "note": "rubric 1.0: reproduces Matthew 5 substantially (49% of the source's "
+             "four-word sequences) though the query is longer and adds material",
+     "label_history": [{"kind": "paraphrase", "rubric": "pre-1.0",
+                        "reason": "the additions were read as rewording rather than as "
+                                  "quotation with interpolations"}]},
+    {"query": "3 Nephi 13", "expected": "Matthew 6", "kind": "quotation",
+     "family": "matthew-5-7", "confidence": "high", "reviewed": True,
+     "note": "rubric 1.0: 84% of Matthew 6's four-word sequences reproduced",
+     "label_history": [{"kind": "paraphrase", "rubric": "pre-1.0",
+                        "reason": "labelled before the rubric distinguished extent of "
+                                  "reproduction from rewording"}]},
+    {"query": "3 Nephi 14", "expected": "Matthew 7", "kind": "quotation",
+     "family": "matthew-5-7", "confidence": "high", "reviewed": True,
+     "note": "rubric 1.0: 86% of Matthew 7's four-word sequences reproduced",
+     "label_history": [{"kind": "paraphrase", "rubric": "pre-1.0",
+                        "reason": "same rubric gap as 3 Nephi 13"}]},
     {"query": "Moroni 7", "expected": "1 Corinthians 13", "kind": "paraphrase",
      "family": "1-corinthians-13", "query_span": "45-48", "expected_span": "4-8",
      "confidence": "high", "reviewed": True,
@@ -166,9 +180,11 @@ PAIRS = [
     # Contextual dependence; scored separately, excluded from retrieval recall.
     {"query": "Mosiah 15", "expected": "Isaiah 53", "kind": "interpretation",
      "family": "isaiah-53", "confidence": "high", "reviewed": True,
+     "secondary_relationship": "partial_quotation",
      "note": "Abinadi's exposition of the servant passage he has just quoted in "
              "Mosiah 14 — dependence is contextual, so it is not counted as "
-             "independent retrieval"},
+             "independent retrieval. Rubric 1.0: interpretation is dominant, with an "
+             "embedded quotation (3% of Isaiah 53's four-word sequences)"},
     {"query": "2 Nephi 2", "expected": "Genesis 3", "kind": "interpretation",
      "family": "genesis-2-3", "query_span": "15-21", "expected_span": "whole",
      "confidence": "medium", "reviewed": True,
@@ -177,8 +193,10 @@ PAIRS = [
     {"query": "Alma 42", "expected": "Genesis 3", "kind": "interpretation",
      "family": "genesis-2-3", "query_span": "2-6", "expected_span": "24",
      "confidence": "medium", "reviewed": True,
+     "secondary_relationship": "partial_quotation",
      "note": "Alma recounts Eden, the tree of life, the cherubim and the flaming "
-             "sword (Genesis 3:24)"},
+             "sword (Genesis 3:24). Rubric 1.0: interpretation is dominant, with the "
+             "flaming-sword wording quoted (7% of Genesis 3's four-word sequences)"},
 
     # ---- reviewed from the text ------------------------------------------
     {"query": "Helaman 5", "expected": "Luke 9", "kind": "allusion",
@@ -299,6 +317,8 @@ def all_pairs():
             "note": row.get("note", ""),
             "reviewed": bool(row.get("reviewed", False)),
             "second_review": row.get("second_review", ""),
+            "secondary_relationship": row.get("secondary_relationship", ""),
+            "label_history": list(row.get("label_history", [])),
         }
         record["split"] = split_for_family(record["family"])
 

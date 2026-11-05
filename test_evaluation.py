@@ -487,3 +487,34 @@ def test_independently_reviewed_labels_record_both_opinions():
 
     assert by_query["3 Nephi 19"]["confidence"] == "high"
     assert "second textual review" in by_query["3 Nephi 19"]["note"]
+
+
+# -------------------------------------------------
+# Rubric 1.0 relabels keep their history
+# -------------------------------------------------
+def test_relabelled_pairs_keep_the_previous_label():
+    by_query = {pair["query"]: pair for pair in all_pairs()}
+
+    for query, old_kind in (("3 Nephi 12", "paraphrase"),
+                            ("3 Nephi 13", "paraphrase"),
+                            ("3 Nephi 14", "paraphrase")):
+        pair = by_query[query]
+        assert pair["kind"] == "quotation", query
+        assert [entry["kind"] for entry in pair["label_history"]] == [old_kind]
+        assert pair["label_history"][0]["reason"], query
+
+
+def test_secondary_relationships_use_the_taxonomy():
+    from evaluation_pairs import ALL_KINDS
+
+    for pair in all_pairs():
+        secondary = pair["secondary_relationship"]
+        assert secondary == "" or secondary in ALL_KINDS, pair["query"]
+        assert secondary != pair["kind"], pair["query"]
+
+
+def test_interpretation_with_an_embedded_quotation_says_so():
+    by_query = {pair["query"]: pair for pair in all_pairs()}
+
+    assert by_query["Mosiah 15"]["secondary_relationship"] == "partial_quotation"
+    assert by_query["Alma 42"]["secondary_relationship"] == "partial_quotation"

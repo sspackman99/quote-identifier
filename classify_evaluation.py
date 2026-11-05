@@ -33,12 +33,16 @@ from candidates import (
     rank_candidates,
     verses_per_chapter,
 )
-from classifier import RELATIONSHIPS, RelationshipClassifier, build_case, http_completer
+from classifier import (RELATIONSHIPS, RUBRIC_VERSION, RelationshipClassifier, build_case,
+                        http_completer)
 from evaluation_pairs import RETRIEVAL_KINDS, all_pairs
 from evaluate_retrieval import load_or_build_index, parse_ref, resolve_targets, summarise_targets
 from preprocess import preprocess_corpus
 
 CONTEXT_RADIUS = 2
+# rough strength order used only to describe disagreements, not to score them
+STRENGTH = {"unrelated": 0, "shared_vocabulary": 1, "allusion": 2, "paraphrase": 3,
+            "partial_quotation": 4, "quotation": 5}
 NEIGHBOURS = 50
 TIE_TOLERANCE = 0.01
 
@@ -319,6 +323,7 @@ def main(argv=None):
             "query": pair["query"],
             "expected": expected,
             "predicted": result["relationship"],
+            "secondary_relationship": result.get("secondary_relationship", ""),
             "confidence": result["confidence"],
             "matched_windows_shown": len(result["matched_windows"]),
             "matched_windows_total": result["matched_total"],
@@ -346,10 +351,31 @@ def main(argv=None):
     classified = [row for row in scored if row["retrieval_ok"]]
     correct_classified = [row for row in classified if row["predicted"] == row["expected"]]
 
-    print(f"\nclassified {len(scored)}/{len(rows)}")
-    print(f"  end-to-end accuracy          {len(correct)}/{len(scored)}")
-    print(f"  classification accuracy      {len(correct_classified)}/{len(classified)} "
-          f"(retrieval-correct pairs only)")
+    print(f"\nrubric version {RUBRIC_VERSION}")
+    print(f"classified {len(scored)}/{len(rows)}")
+    print(f"  source identified            {len(classified)}/{len(scored)} "
+          f"(candidate chapter was a labelled source)")
+    print(f"  relationship accuracy        {len(correct_classified)}/{len(classified)} "
+          f"(among source-identified pairs)")
+    print(f"  end-to-end accuracy          {len(correct)}/{len(scored)} "
+          f"(source AND relationship)")
+
+    disagreements = [row for row in classified if row["predicted"] != row["expected"]]
+    if disagreements:
+        directions = Counter()
+        for row in disagreements:
+            expected_rank = STRENGTH.get(row["expected"])
+            predicted_rank = STRENGTH.get(row["predicted"])
+            if expected_rank is None or predicted_rank is None:
+                directions["off the strength scale"] += 1
+            elif predicted_rank > expected_rank:
+                directions["label too strong"] += 1
+            elif predicted_rank < expected_rank:
+                directions["label too weak"] += 1
+            else:
+                directions["same strength, different kind"] += 1
+        detail = ", ".join(f"{name} {count}" for name, count in directions.most_common())
+        print(f"  disagreements                {len(disagreements)} ({detail})")
     if scored:
         agreement = [row["span_agreement"] for row in scored
                      if row["span_agreement"] is not None]
@@ -372,6 +398,7 @@ def main(argv=None):
 
     if args.json:
         payload = {
+            "rubric_version": RUBRIC_VERSION,
             "model": classifier.model,
             "pairs": len(rows),
             "classified": len(scored),

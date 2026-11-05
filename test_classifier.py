@@ -80,8 +80,11 @@ def test_prompt_keeps_matched_evidence_and_context_apart():
 def test_instructions_states_that_similarity_is_not_dependence():
     from classifier import SYSTEM_PROMPT
 
-    assert "not evidence of dependence" in SYSTEM_PROMPT
+    assert "not by itself evidence of dependence" in SYSTEM_PROMPT
     assert "needs_review to true" in SYSTEM_PROMPT
+    assert "Rubric version 1.0" in SYSTEM_PROMPT
+    assert "about the EXTENT of the reproduced text" in SYSTEM_PROMPT
+    assert "about the RELATION between the statements" in SYSTEM_PROMPT
 
 
 def test_parse_accepts_a_plain_json_object():
@@ -316,3 +319,26 @@ def test_empty_answer_after_thinking_raises_a_clear_error(monkeypatch):
         complete("system", "user")
 
     assert "spent the whole token budget" in str(error.value)
+
+
+def test_classifier_reports_the_rubric_version():
+    from classifier import RUBRIC_VERSION
+
+    result = RelationshipClassifier(lambda system, user: response()).classify(CASE)
+
+    assert result["rubric_version"] == RUBRIC_VERSION == "1.0"
+
+
+def test_a_secondary_relationship_is_kept_but_must_be_in_the_taxonomy():
+    result = parse_response(response(secondary_relationship="partial_quotation",
+                                     relationship="interpretation"))
+    assert result["secondary_relationship"] == "partial_quotation"
+
+    with pytest.raises(ClassifierResponseError):
+        parse_response(response(secondary_relationship="borrowing"))
+
+
+def test_secondary_equal_to_primary_is_dropped():
+    result = parse_response(response(relationship="paraphrase",
+                                     secondary_relationship="paraphrase"))
+    assert result["secondary_relationship"] == ""
