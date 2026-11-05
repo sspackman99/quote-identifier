@@ -55,6 +55,32 @@ with context expansion, where a span means something.
 `test_window_coverage.py` checks those as geometric properties over many chapter lengths
 and window/overlap settings, independently of the similarity pipeline.
 
+## Filtering common phrases
+
+3-grams that are too common are stripped before matching (`filtering.py`). Two measures
+exist, and their thresholds are NOT interchangeable because the denominators differ:
+
+- `document frequency` (default): how many chapters contain the trigram, counted once per
+  chapter however often it repeats. A document is `(corpus, book, chapter)`, so the same
+  book/chapter in a different corpus is a different document.
+- `occurrence count` (legacy, `--filter-metric occurrence`): every position in every
+  window. Overlapping windows and repeats inside a passage inflate it. Retained as a
+  separate statistic so the two can be compared on the same corpus.
+
+Measured on the Book of Mormon (239 chapters, 17,857 windows, 535,710 window tokens):
+
+    metric                                    phrases   tokens removed
+    document >20% of chapters (default)            76   52,059  (9.7%)
+    occurrence >1% of windows (legacy)             54   45,927  (8.6%)
+    document >1% of chapters (same number)     12,341  281,655 (52.6%)
+
+That last row is why `MIN_DOCUMENT_FREQUENCY` is 0.20 and not 0.01: on this corpus 1% of
+239 chapters means "in 3 chapters", which is a far looser bar than 1% of 17,857 windows.
+
+Effect on the top 750: 606 of 665 reference pairs are shared; 59 appear only under the
+document metric and 58 only under the legacy one, including some high-scoring pairs in
+both directions. `--filter-metric occurrence` reproduces the old behaviour exactly.
+
 ## Tests
 
     python -m pytest -q

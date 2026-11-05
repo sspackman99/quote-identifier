@@ -16,8 +16,10 @@ import pandas as pd
 
 from chunking import build_chapter_token_stream, create_overlapping_windows
 from filtering import (
+    build_ngram_document_frequencies,
     build_ngram_frequencies,
     identify_high_frequency_ngrams,
+    identify_ngrams_by_document_frequency,
     remove_high_freq_phrases,
 )
 from preprocess import preprocess_bom, resolve_corpus_path
@@ -37,8 +39,23 @@ WINDOW_SIZE = 30
 WINDOW_OVERLAP = 15
 TOP_N = 750
 
+NGRAM_N = 3
+# Fraction of DOCUMENTS (chapters) that must contain an n-gram before it is
+# filtered out. Used when filter_metric == "document".
+#
+# Calibrated on the Book of Mormon (239 chapters, 17,857 windows): 0.20 selects
+# 76 trigrams and drops 9.7% of window tokens, close to the legacy occurrence
+# rule's 54 trigrams / 8.6%. The same 0.01 used on the occurrence scale would
+# here select 12,341 trigrams and drop 52% of the text — the two denominators
+# are not interchangeable, so the threshold has to be chosen per metric.
+MIN_DOCUMENT_FREQUENCY = 0.20
+# Fraction of WINDOWS, legacy occurrence-rate semantics. Used only to reproduce
+# the pre-document-frequency behaviour.
+LEGACY_OCCURRENCE_RATE = 0.01
 
-def run(corpus_path, output_path="top_matches.csv", dedupe=True):
+
+def run(corpus_path, output_path="top_matches.csv", dedupe=True,
+        filter_metric="document"):
     """Run the full pipeline and write the scored matches to a CSV."""
     # --------------------------------------------
     # 1. PREPROCESS
@@ -61,17 +78,41 @@ def run(corpus_path, output_path="top_matches.csv", dedupe=True):
     # 3. REMOVE HIGH-FREQUENCY PHRASES
     # --------------------------------------------
     print("Computing n-gram frequencies...")
-    ngram_counts = build_ngram_frequencies(windows, n=3)
-
-    high_freq = identify_high_frequency_ngrams(
-        ngram_counts,
-        total_windows=len(windows),
-        frequency_threshold=0.01,
+    occurrence_counts = build_ngram_frequencies(windows, n=NGRAM_N)
+    document_frequency, total_documents = build_ngram_document_frequencies(
+        windows, n=NGRAM_N
     )
 
-    print(f"High-frequency phrases identified: {len(high_freq)}")
+    if filter_metric == "document":
+        high_freq = identify_ngrams_by_document_frequency(
+            document_frequency,
+            total_documents=total_documents,
+            min_document_frequency=MIN_DOCUMENT_FREQUENCY,
+        )
+        print(
+            f"Filter metric: document frequency "
+            f"(> {MIN_DOCUMENT_FREQUENCY:.1%} of {total_documents} chapters) "
+            f"-> {len(high_freq)} phrases"
+        )
+    elif filter_metric == "occurrence":
+        high_freq = identify_high_frequency_ngrams(
+            occurrence_counts,
+            total_windows=len(windows),
+            frequency_threshold=LEGACY_OCCURRENCE_RATE,
+        )
+        print(
+            f"Filter metric: occurrence rate, legacy "
+            f"(> {LEGACY_OCCURRENCE_RATE:.1%} of {len(windows)} windows) "
+            f"-> {len(high_freq)} phrases"
+        )
+    else:
+        raise ValueError(f"unknown filter metric: {filter_metric}")
 
-    windows = remove_high_freq_phrases(windows, high_freq, n=3)
+    tokens_before = sum(len(window["tokens"]) for window in windows)
+    windows = remove_high_freq_phrases(windows, high_freq, n=NGRAM_N)
+    tokens_after = sum(len(window["filtered_tokens"]) for window in windows)
+    print(f"Filtered tokens: {tokens_before - tokens_after} of {tokens_before} "
+          f"({(tokens_before - tokens_after) / tokens_before:.1%})")
 
     # --------------------------------------------
     # 4. MINHASH MATCHING
@@ -167,6 +208,14 @@ def main(argv=None):
         help="keep duplicate pair records (both directions, one per method) instead of "
              "collapsing each pair to one row",
     )
+    parser.add_argument(
+        "--filter-metric",
+        choices=["document", "occurrence"],
+        default="document",
+        help="how common a 3-gram must be before it is filtered out: 'document' "
+             "(default) counts chapters containing it, 'occurrence' reproduces the "
+             "legacy count-per-window rate",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -175,7 +224,8 @@ def main(argv=None):
         parser.exit(2, f"{parser.prog}: error: {exc}\n")
 
     print(f"Corpus: {corpus_path}")
-    run(corpus_path, args.output, dedupe=not args.no_dedupe)
+    run(corpus_path, args.output, dedupe=not args.no_dedupe,
+        filter_metric=args.filter_metric)
     return 0
 
 
