@@ -43,6 +43,18 @@ Candidate pairs are still window pairs, and windows overlap, so the same passage
 legitimately appear more than once with different verse spans. Collapsing those belongs
 with context expansion, where a span means something.
 
+## Windowing
+
+30-token windows with 15-token overlap, built per chapter (`chunking.py`):
+
+- a window never crosses a chapter boundary;
+- a chapter shorter than the window yields one window holding the whole chapter;
+- the last window is anchored to the chapter end when the step grid would leave a tail,
+  so no trailing text is left uncovered.
+
+`test_window_coverage.py` checks those as geometric properties over many chapter lengths
+and window/overlap settings, independently of the similarity pipeline.
+
 ## Tests
 
     python -m pytest -q

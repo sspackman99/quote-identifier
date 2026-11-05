@@ -281,5 +281,8 @@ class TestCreateOverlappingWindows:
         
         windows = create_overlapping_windows([chapter_data], window_size=3, overlap=2)
         
-        # Should return empty list since chapter is too short
-        assert len(windows) == 0
+        # A chapter shorter than the window is one window holding the whole chapter
+        assert len(windows) == 1
+        assert windows[0]["tokens"] == ["a", "b"]
+        assert windows[0]["start_token_index"] == 0
+        assert windows[0]["end_token_index"] == 2

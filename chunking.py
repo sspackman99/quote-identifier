@@ -47,34 +47,55 @@ def create_overlapping_windows(chapter_streams,
                                overlap=15):
     """
     Creates overlapping token windows per chapter.
+
+    Windows never cross a chapter boundary, and every token in a chapter is
+    covered by at least one window: when the last step boundary would leave a
+    tail shorter than the window, one extra window anchored to the chapter end
+    is appended (unless that start was already emitted). A chapter shorter than
+    the window produces a single window holding the whole chapter.
     """
-    
+    if window_size <= 0:
+        raise ValueError("window_size must be positive")
+    if overlap < 0:
+        raise ValueError("overlap must not be negative")
+    if overlap >= window_size:
+        raise ValueError("overlap must be smaller than window_size")
+
     step = window_size - overlap
     windows = []
-    
+
     for chapter_data in chapter_streams:
-        
+
         tokens = chapter_data["tokens"]
         token_to_verse = chapter_data["token_to_verse"]
-        
-        for i in range(0, len(tokens) - window_size + 1, step):
-            
-            window_tokens = tokens[i:i+window_size]
-            verse_span = token_to_verse[i:i+window_size]
-            
-            start_verse = verse_span[0]
-            end_verse = verse_span[-1]
-            
+        total = len(tokens)
+
+        if total == 0:
+            continue
+
+        if total <= window_size:
+            starts = [0]
+        else:
+            starts = list(range(0, total - window_size + 1, step))
+            final_start = total - window_size
+            if starts[-1] != final_start:
+                starts.append(final_start)
+
+        for i in starts:
+
+            end = min(i + window_size, total)
+            verse_span = token_to_verse[i:end]
+
             windows.append({
                 "corpus": chapter_data["corpus"],
                 "book": chapter_data["book"],
                 "chapter": chapter_data["chapter"],
                 "start_token_index": i,
-                "end_token_index": i + window_size,
-                "start_verse": start_verse,
-                "end_verse": end_verse,
-                "tokens": window_tokens,
-                "text": " ".join(window_tokens)
+                "end_token_index": end,
+                "start_verse": verse_span[0],
+                "end_verse": verse_span[-1],
+                "tokens": tokens[i:end],
+                "text": " ".join(tokens[i:end])
             })
     
     return windows
