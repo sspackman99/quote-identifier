@@ -36,6 +36,7 @@ FAMILY_SPLITS = {
     "psalm-85": "test",
     "exodus-20-decalogue": "test",
     "acts-2-pentecost": "test",
+    "abrahamic-promise": "test",
     "isaiah-2-14": "dev",
     "isaiah-48-49": "test",
     "isaiah-50-51": "dev",
@@ -52,7 +53,6 @@ FAMILY_SPLITS = {
     "control-shared-2": "dev",
     "control-unrelated-1": "dev",
     "control-unrelated-2": "dev",
-    "control-unrelated-3": "dev",
     "control-unrelated-4": "dev",
     "control-unrelated-5": "dev",
     "control-unrelated-6": "test",
@@ -190,6 +190,15 @@ PAIRS = [
           "note": "the Spirit descending as fire, and speech following, patterns on "
                   "Pentecost; best 0.7754"},
      ]},
+    {"query": "Ether 1", "expected": "Genesis 26", "kind": "allusion",
+     "family": "abrahamic-promise", "query_span": "43", "expected_span": "3-4",
+     "confidence": "low", "reviewed": True,
+     "note": "reviewed, reconsidered twice: 'I will bless thee and thy seed' plus a "
+             "promise to raise up a great nation follows the Abrahamic covenant formula "
+             "of Genesis 26:3-4 (land, multiplied seed, all nations blessed). The wording "
+             "is not reproduced and the real source family is the Abrahamic promises "
+             "rather than this chapter alone, so: low-confidence allusion, not a "
+             "quotation, and no longer a clean negative control."},
     {"query": "Helaman 11", "expected": "Psalms 85", "kind": "allusion",
      "family": "psalm-85", "query_span": "11-12", "expected_span": "4-5",
      "confidence": "low", "reviewed": True,
@@ -225,12 +234,6 @@ PAIRS = [
      "note": "reviewed: the covenant 'inasmuch as they keep my commandments they shall "
              "prosper in the land' formula, closest Deuteronomy 33:9-10 (0.7277); "
              "inherited covenant language, not a source quotation."},
-    {"query": "Ether 1", "kind": "shared_vocabulary", "family": "control-unrelated-3",
-     "reviewed": True,
-     "note": "reviewed: the promise of land and seed ('I will bless thee and thy seed') "
-             "follows the Abraham/Isaac blessing formula; closest Genesis 26:3-4 "
-             "(0.8169), the strongest control in the set and the best next candidate "
-             "for review. Formulaic, not quoted."},
     {"query": "Ether 6", "kind": "shared_vocabulary", "family": "control-unrelated-4",
      "reviewed": True,
      "note": "reviewed: the storm-driven voyage (Jonah 1:3-4, 0.7323) and the "

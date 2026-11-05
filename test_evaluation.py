@@ -434,3 +434,44 @@ def test_secondary_targets_keep_their_own_family():
     families = {t["ref"]: t["family"] for t in pair["expected_targets"]}
 
     assert families == {"Isaiah 52": "isaiah-52", "Exodus 20": "exodus-20-decalogue"}
+
+
+def test_primary_threshold_credit_requires_the_primary_span():
+    """A rank-1 primary chapter with the wrong verses is not a primary TP."""
+    row = _row("Mosiah 12", "Isaiah 52", 1, "Isaiah 52", 0.96,
+               kind="partial_quotation", also_expected=["Exodus 20"],
+               spans={"Isaiah 52": "7-10", "Exodus 20": "2-4"})
+    row["top1_intervals"] = [(90, 91)]
+
+    metrics = threshold_metrics([row], 0.90)
+
+    assert metrics["true_positives"] == 0
+    assert metrics["true_positives_primary"] == 0
+
+    row["top1_intervals"] = [(7, 9)]
+    metrics = threshold_metrics([row], 0.90)
+    assert metrics["true_positives"] == 1
+    assert metrics["true_positives_primary"] == 1
+
+
+def test_secondary_target_credit_is_not_primary_credit_at_the_threshold():
+    row = _row("Mosiah 12", "Isaiah 52", 2, "Exodus 20", 0.96,
+               kind="partial_quotation", also_expected=["Exodus 20"],
+               spans={"Isaiah 52": "7-10", "Exodus 20": "2-4"})
+    row["top1_intervals"] = [(2, 4)]
+
+    metrics = threshold_metrics([row], 0.90)
+
+    assert metrics["true_positives"] == 1
+    assert metrics["true_positives_primary"] == 0
+
+
+def test_ether_1_is_no_longer_a_clean_negative_control():
+    """Second look: the Abrahamic covenant formula is a relationship, not noise."""
+    pair = next(p for p in all_pairs() if p["query"] == "Ether 1")
+
+    assert pair["kind"] == "allusion"
+    assert pair["expected"] == "Genesis 26"
+    assert pair["confidence"] == "low"
+    assert pair["reviewed"]
+    assert "Abrahamic" in pair["note"]

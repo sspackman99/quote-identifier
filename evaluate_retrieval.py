@@ -249,6 +249,17 @@ def summarise_targets(resolved):
     }
 
 
+def primary_credited_by_span(row):
+    """Primary threshold credit: primary reference AND its annotated span."""
+    top = row.get("top1")
+    intervals = row.get("top1_intervals") or []
+    for target in row.get("expected_targets", []):
+        if (target.get("primary") and target["ref"] == top
+                and span_hit({"source_intervals": intervals}, target["span"])):
+            return True
+    return False
+
+
 def credited_by_span(row):
     """Was the top hit a labelled source whose matched range touches its span?"""
     top = row.get("top1")
@@ -272,7 +283,7 @@ def threshold_metrics(rows, threshold):
                       if row["kind"] in RETRIEVAL_KINDS and credited_by_span(row)]
     primary_matches = [row for row in accepted
                        if row["kind"] in RETRIEVAL_KINDS
-                       and row.get("top1") == row.get("expected")]
+                       and primary_credited_by_span(row)]
     fp_controls = [row for row in accepted if row["kind"] in CONTROL_KINDS]
     fp_context = [row for row in accepted if row["kind"] in CONTEXT_KINDS]
     other = [row for row in accepted
@@ -331,6 +342,13 @@ def print_recall(title, rows, tiers):
         print(f"  {label:<24} n={overall['pairs']:<3} "
               f"@1={overall['recall_at_1']:.0%}  @5={overall['recall_at_5']:.0%}  "
               f"@20={overall['recall_at_20']:.0%}")
+
+    named = [row for row in rows if row["kind"] in ("quotation", "partial_quotation")]
+    named_metrics = recall_metrics(named, "span_rank")
+    if named_metrics:
+        print(f"  {'quotations+partials':<24} n={named_metrics['pairs']:<3} "
+              f"@1={named_metrics['recall_at_1']:.0%}  @5={named_metrics['recall_at_5']:.0%}  "
+              f"@20={named_metrics['recall_at_20']:.0%}")
 
     for kind in RETRIEVAL_KINDS:
         subset = [row for row in rows if row["kind"] == kind]

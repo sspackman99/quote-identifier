@@ -148,30 +148,33 @@ kept in full (no top-ten cut); the row records `source_pairs_total` so a consume
 is complete.
 
 Measured on the current set (69,929 windows, 50 neighbours, tie tolerance 0.01). The label
-review moved two controls into the positive set, so these denominators differ from earlier
-runs and the numbers are not directly comparable to them:
+review has moved three chapters out of the control set over its two passes, so these
+denominators differ from earlier runs and the numbers are not directly comparable to them:
 
     tier                      dev @1   test @1   test @5   test @20
-    chapter retrieved          20/20     8/12      10/12     10/12
-    source span                20/20    10/12      11/12     11/12
-    span + query localization  20/20    10/12      11/12     11/12
-    primary source span        20/20     9/12      11/12     11/12
+    chapter retrieved          20/20    8/13      10/13     11/13
+    source span                20/20    11/13     12/13     12/13
+    span + query localization  20/20    11/13     12/13     12/13
+    primary source span        20/20    10/13     12/13     12/13
 
-    chapter ranking, for comparison:  chapter retrieved 8/12 @1, 10/12 @5
-    partial quotations (span tier):   @1 2/3, @5 3/3
-    allusions (span tier):            @1 3/4, @5 3/4
+    quotations + partials      16/16     7/8       8/8       8/8
+    allusions                  -         4/5       4/5       4/5
+
+    chapter ranking, for comparison: chapter retrieved 8/13 @1, 10/13 @5
+
+Quotations and partial quotations are always published separately from allusions: they are
+different kinds of textual relationship, and pooling them would hide which one moved.
 
 Regression cases, chapter rank -> span rank: Moroni 10 30 -> 2, Mosiah 12 3 -> 1 (credited
 to its second source, Exodus 20), 3 Nephi 20 1 -> 1, Mosiah 14 1 -> 1. The single-verse
-quotation in Moroni 10:31 is the case the change exists for.
+quotation in Moroni 10:31 is the case the change exists for. Ether 1 -> Genesis 26 is the
+clearest illustration of the same effect in the other direction: chapter rank 11, span rank
+1, best 0.8169 — hit-count ranking buries it behind chapters with more scattered matches.
 
 Held out at the 0.90 threshold fixed in advance: 9 accepted, 7 true positives (6 of them
-primary), 0 control false positives, 2 accepted context pairs, precision 0.78, recall 0.58,
-false-positive rate 0.00 over 9 reviewed controls. The threshold remains untuned, and nine
+primary), 0 control false positives, 2 accepted context pairs, precision 0.78, recall 0.54,
+false-positive rate 0.00 over 8 reviewed controls. The threshold remains untuned, and eight
 controls is not a reliable estimate of false-positive behaviour in general.
-
-Every labelled source carries its own family, and the split check validates all of them, so
-a secondary source cannot cross the dev/test boundary unnoticed.
 
 ## Output
 
