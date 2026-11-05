@@ -216,8 +216,11 @@ def test_rank_chapters_handles_empty_candidates():
 
 
 def _row(query, expected, rank, top1, top1_best, kind="quotation", split="dev"):
+    # both ranking rules are carried on a result row; these tests exercise the
+    # metric arithmetic, so the two ranks are set to the same value
     return {"query": query, "expected": expected, "kind": kind, "split": split,
-            "expected_rank": rank, "top1": top1, "top1_best": top1_best}
+            "expected_rank": rank, "chapter_rank": rank, "span_rank": rank,
+            "top1": top1, "top1_best": top1_best}
 
 
 def test_recall_counts_ranks_within_cutoffs():

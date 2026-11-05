@@ -1,25 +1,26 @@
 """Evaluate cross-corpus retrieval against labelled textual relationships.
 
-Builds ONE index over both corpora (or loads a cached one), then for every pair
-ranks KJV chapters by how many of the query chapter's windows point at them.
+Builds ONE index over both corpora (or loads a cached one). For every pair, the
+SAME matched-window evidence is ranked by two rules so the comparison is
+like-for-like:
 
-Reporting rules that matter for honesty:
+  chapter   the original rule: window-hit count, then best similarity
+  span      span-aware: best similarity, then distinct non-overlapping supports,
+            then coverage (see candidates.py)
 
-  * recall is computed over RETRIEVAL_KINDS only. "interpretation" pairs (an
-    exposition of a source the discourse already quotes) are scored and shown
-    separately, because they test contextual dependence, not retrieval.
-  * thresholds are swept on the DEV split only; the held-out TEST split is
-    reported at a threshold fixed in advance (0.90).
-  * precision, recall and false-positive rate appear together, controls accepted
-    above the threshold count as false positives, and the number of labels Sam has
-    actually reviewed is printed next to the result.
+The report shows both ranks per pair, whether the matched source range touches the
+annotated span, and whether the query-side range touches the verses annotated as
+doing the quoting. Annotations only SCORE the retrieval; nothing is told where the
+quotation is.
+
+Reporting rules: recall covers RETRIEVAL_KINDS only ("interpretation" is scored
+separately); thresholds are swept on dev and the held-out split is reported at a
+threshold fixed in advance (0.90); precision/recall/false-positive rate appear
+together with the number of reviewed labels.
 
 Usage:
     python evaluate_retrieval.py --cache-index .eval_cache
-    python evaluate_retrieval.py --json eval_result.json
-
-The index cache makes re-running after a scoring change cheap: the first run
-embeds both corpora (~6 min), later runs load the vectors in seconds.
+    python evaluate_retrieval.py --json eval_result.json --ranking span
 """
 
 import argparse
@@ -30,6 +31,14 @@ from pathlib import Path
 
 import numpy as np
 
+from candidates import (
+    aggregate_candidates,
+    collect_matches,
+    rank_candidates,
+    query_span_hit,
+    span_hit,
+    verses_per_chapter,
+)
 from chunking import build_chapter_token_stream, create_overlapping_windows
 from evaluation_pairs import (
     CONTEXT_KINDS,
@@ -53,6 +62,7 @@ META_FIELDS = ("corpus", "book_id", "book", "chapter", "start_verse", "end_verse
 
 # Fixed before the held-out split was scored; not tuned on test data.
 HELD_OUT_THRESHOLD = 0.90
+REGRESSION_CASES = ("Moroni 10", "Mosiah 12", "3 Nephi 20", "Mosiah 14")
 
 
 def build_windows(bom_path, kjv_path):
@@ -105,45 +115,6 @@ def load_or_build_index(args):
     return meta, embeddings
 
 
-def rank_chapters(candidates):
-    """Rank target chapters by hit count, then best similarity, then name."""
-    ranked = [
-        {"book": book, "chapter": chapter,
-         "hits": len(scores), "best": max(scores), "mean": sum(scores) / len(scores)}
-        for (book, chapter), scores in candidates.items()
-    ]
-    ranked.sort(key=lambda row: (-row["hits"], -row["best"], row["book"], row["chapter"]))
-    return ranked
-
-
-def collect_candidates(meta, index, embeddings, query_book, query_chapter, neighbors):
-    """For every query window, collect the target-corpus chapters it points at."""
-    query_indices = [
-        i for i, window in enumerate(meta)
-        if window["corpus"] == "bom"
-        and window["book"] == query_book
-        and window["chapter"] == query_chapter
-    ]
-    if not query_indices:
-        raise SystemExit(f"no windows for {query_book} {query_chapter}")
-
-    k = min(neighbors + 1, len(meta))
-    candidates = defaultdict(list)
-
-    for i in query_indices:
-        D, I = index.search(np.array([embeddings[i]]), k)
-        for score, j in zip(D[0], I[0]):
-            j = int(j)
-            if j == i:
-                continue
-            target = meta[j]
-            if target["corpus"] == "bom":
-                continue
-            candidates[(target["book"], target["chapter"])].append(float(score))
-
-    return candidates, len(query_indices)
-
-
 def parse_ref(text):
     book, chapter = text.rsplit(" ", 1)
     if not chapter.isdigit():
@@ -151,7 +122,27 @@ def parse_ref(text):
     return book, int(chapter)
 
 
-def recall_metrics(rows):
+def chapter_hits(meta, matches):
+    """The original rule's input: chapter -> list of similarities."""
+    hits = defaultdict(list)
+    for match in matches:
+        target = meta[match["target_index"]]
+        hits[(target["book"], target["chapter"])].append(match["sim"])
+    return hits
+
+
+def rank_chapters(hits):
+    """Original rule: most window hits first, then best similarity."""
+    ranked = [
+        {"book": book, "chapter": chapter,
+         "hits": len(scores), "best": max(scores), "mean": sum(scores) / len(scores)}
+        for (book, chapter), scores in hits.items()
+    ]
+    ranked.sort(key=lambda row: (-row["hits"], -row["best"], row["book"], row["chapter"]))
+    return ranked
+
+
+def recall_metrics(rows, rank_field="span_rank"):
     """Recall@1/5/20 over RETRIEVAL positives (interpretation is excluded)."""
     scored = [row for row in rows if row["kind"] in RETRIEVAL_KINDS]
     if not scored:
@@ -159,32 +150,56 @@ def recall_metrics(rows):
 
     def at(k):
         return sum(1 for row in scored
-                   if row["expected_rank"] and row["expected_rank"] <= k) / len(scored)
+                   if row.get(rank_field) and row[rank_field] <= k) / len(scored)
 
     return {
         "pairs": len(scored),
         "recall_at_1": at(1),
         "recall_at_5": at(5),
         "recall_at_20": at(20),
-        "missed": [row["query"] for row in scored if not row["expected_rank"]],
+        "missed": [row["query"] for row in scored if not row.get(rank_field)],
     }
 
 
-def threshold_metrics(rows, threshold):
-    """Auto-accept every pair whose top hit scores at or above the threshold.
+def span_recall_metrics(rows, rank_field="span_rank"):
+    """Recall@k requiring the correct chapter in top k AND a source-span hit."""
+    scored = [row for row in rows if row["kind"] in RETRIEVAL_KINDS]
+    if not scored:
+        return None
 
-    tp              retrieval positive whose top hit is the labelled source
-    fp_controls     control accepted — this is what the false-positive rate counts
-    fp_context      interpretation accepted: a real relationship, but not a
-                    quotation, so a wrong auto-accept that is not mere noise
-    """
-    scored = [row for row in rows if row["top1_best"] is not None]
+    def at(k):
+        return sum(1 for row in scored
+                   if row.get(rank_field) and row[rank_field] <= k
+                   and row.get("source_span_hit")) / len(scored)
+
+    return {"pairs": len(scored), "recall_at_1": at(1),
+            "recall_at_5": at(5), "recall_at_20": at(20)}
+
+
+def localization_metrics(rows, rank_field="span_rank"):
+    """Recall@k where the QUERY-side supporting range touches the annotated verses."""
+    scored = [row for row in rows if row["kind"] in RETRIEVAL_KINDS]
+    if not scored:
+        return None
+
+    def at(k):
+        return sum(1 for row in scored
+                   if row.get(rank_field) and row[rank_field] <= k
+                   and row.get("query_span_hit")) / len(scored)
+
+    return {"pairs": len(scored), "recall_at_1": at(1),
+            "recall_at_5": at(5), "recall_at_20": at(20)}
+
+
+def threshold_metrics(rows, threshold):
+    """Auto-accept every pair whose top hit scores at or above the threshold."""
+    scored = [row for row in rows if row.get("top1_best") is not None]
     if not scored:
         return None
 
     accepted = [row for row in scored if row["top1_best"] >= threshold]
     true_positives = [row for row in accepted
-                      if row["kind"] in RETRIEVAL_KINDS and row["top1"] == row["expected"]]
+                      if row["kind"] in RETRIEVAL_KINDS and row.get("top1") == row.get("expected")]
     fp_controls = [row for row in accepted if row["kind"] in CONTROL_KINDS]
     fp_context = [row for row in accepted if row["kind"] in CONTEXT_KINDS]
     other = [row for row in accepted
@@ -220,20 +235,29 @@ def threshold_sweep(rows, step=0.02, low=0.60, high=1.00):
     return sweep
 
 
-def print_recall(title, rows):
-    print(f"\n{title}")
+def print_recall(title, rows, rank_field):
+    rule = rank_field.replace("_rank", "")
+    print(f"\n{title} — ranking: {rule}")
     for kind in RETRIEVAL_KINDS:
-        metrics = recall_metrics([row for row in rows if row["kind"] == kind])
+        subset = [row for row in rows if row["kind"] == kind]
+        metrics = recall_metrics(subset, rank_field)
         if not metrics:
             continue
+        span = span_recall_metrics(subset, rank_field)
+        assert span is not None
         print(f"  {kind:<18} n={metrics['pairs']:<3} @1={metrics['recall_at_1']:.0%}  "
-              f"@5={metrics['recall_at_5']:.0%}  @20={metrics['recall_at_20']:.0%}"
-              + (f"  misses={metrics['missed']}" if metrics["missed"] else ""))
-    overall = recall_metrics(rows)
+              f"@5={metrics['recall_at_5']:.0%}  @20={metrics['recall_at_20']:.0%}  "
+              f"| span-hit @1={span['recall_at_1']:.0%} @5={span['recall_at_5']:.0%}")
+    overall = recall_metrics(rows, rank_field)
     if overall:
+        span = span_recall_metrics(rows, rank_field)
+        local = localization_metrics(rows, rank_field)
+        assert span is not None and local is not None
         print(f"  {'retrieval total':<18} n={overall['pairs']:<3} "
               f"@1={overall['recall_at_1']:.0%}  @5={overall['recall_at_5']:.0%}  "
-              f"@20={overall['recall_at_20']:.0%}")
+              f"@20={overall['recall_at_20']:.0%}  "
+              f"| span-hit @1={span['recall_at_1']:.0%} @5={span['recall_at_5']:.0%} "
+              f"| query-span @1={local['recall_at_1']:.0%}")
 
 
 def main(argv=None):
@@ -244,6 +268,13 @@ def main(argv=None):
                         help="directory for cached embeddings/meta (default .eval_cache)")
     parser.add_argument("--neighbors", type=int, default=50,
                         help="neighbours per query window (default 50)")
+    parser.add_argument("--ranking", choices=["span", "chapter"], default="span",
+                        help="rule used for the headline metrics (default span)")
+    parser.add_argument("--tie-tolerance", type=float, default=0.01,
+                        help="similarity band treated as a tie before support counts "
+                             "(default 0.01). Dev cannot discriminate this value: every "
+                             "dev positive is near-verbatim and ranks first at any "
+                             "tolerance up to 0.02.")
     parser.add_argument("--json", help="write the full result as JSON here")
     args = parser.parse_args(argv)
 
@@ -253,32 +284,54 @@ def main(argv=None):
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
 
+    chapter_sizes = verses_per_chapter(meta)
     pairs = all_pairs()
-    results = []
     reviewed = sum(1 for pair in pairs if pair["reviewed"])
+    results = []
 
     print(f"\nEvaluating {len(pairs)} labelled pairs against {len(meta)} windows "
           f"({reviewed} reviewed against the text, {len(pairs) - reviewed} not)")
-    print(f"{'#':>3}  {'query':<12} {'span':<10} {'expected':<15} {'span':<11} "
-          f"{'kind':<18} {'split':<5} {'rank':>4} {'best':>7}  {'top-1':<18}")
+    print(f"{'#':>3}  {'query':<12} {'kind':<18} {'split':<5} {'ch#':>4} {'sp#':>4} "
+          f"{'best':>7} {'sup':>3} {'src range':<10} {'span':<4}  {'top-1 (span rule)':<18}")
 
     for number, pair in enumerate(pairs, 1):
         query_book, query_chapter = parse_ref(pair["query"])
-        candidates, query_windows = collect_candidates(
-            meta, index, embeddings, query_book, query_chapter, args.neighbors
-        )
-        ranked = rank_chapters(candidates)
-        top = ranked[0] if ranked else None
+        query_indices = [
+            i for i, window in enumerate(meta)
+            if window["corpus"] == "bom"
+            and window["book"] == query_book
+            and window["chapter"] == query_chapter
+        ]
+        if not query_indices:
+            raise SystemExit(f"no windows for {pair['query']}")
+
+        matches = collect_matches(meta, index, embeddings, query_indices, args.neighbors)
+        chapter_ranked = rank_chapters(chapter_hits(meta, matches))
+        span_candidates = aggregate_candidates(meta, matches, chapter_sizes)
+        span_ranked = rank_candidates(span_candidates, args.tie_tolerance)
 
         expected = pair["expected"]
-        expected_rank = None
-        expected_row = None
+        chapter_rank = span_rank = None
+        chapter_row = span_row = None
+        source_hit = query_hit = None
+
         if expected:
             expected_book, expected_chapter = parse_ref(expected)
-            for rank, row in enumerate(ranked, 1):
-                if row["book"] == expected_book and row["chapter"] == expected_chapter:
-                    expected_rank, expected_row = rank, row
+
+            for rank, row in enumerate(chapter_ranked, 1):
+                if (row["book"], row["chapter"]) == (expected_book, expected_chapter):
+                    chapter_rank, chapter_row = rank, row
                     break
+
+            candidate = span_candidates.get((expected_book, expected_chapter))
+            if candidate is not None:
+                span_rank = candidate["rank"]
+                span_row = candidate
+                source_hit = span_hit(candidate, pair["expected_span"])
+                query_hit = query_span_hit(candidate, pair["query_span"])
+
+        top = span_ranked[0] if span_ranked else None
+        top1 = f"{top['book']} {top['chapter']}" if top else None
 
         results.append({
             "query": pair["query"],
@@ -291,39 +344,63 @@ def main(argv=None):
             "query_span": pair["query_span"],
             "expected_span": pair["expected_span"],
             "note": pair["note"],
-            "query_windows": query_windows,
-            "expected_rank": expected_rank,
-            "expected_hits": expected_row["hits"] if expected_row else 0,
-            "expected_best": expected_row["best"] if expected_row else None,
-            "top1": f"{top['book']} {top['chapter']}" if top else None,
+            "chapter_rank": chapter_rank,
+            "chapter_best": chapter_row["best"] if chapter_row else None,
+            "span_rank": span_rank,
+            "span_best": span_row["best"] if span_row else None,
+            "span_support": span_row["support"] if span_row else 0,
+            "span_coverage": span_row["coverage"] if span_row else None,
+            "source_range": span_row["source_range"] if span_row else None,
+            "query_range": span_row["query_range"] if span_row else None,
+            "source_span_hit": source_hit,
+            "query_span_hit": query_hit,
+            "top1": top1,
             "top1_best": top["best"] if top else None,
-            "chapters_retrieved": len(ranked),
+            "top1_support": top["support"] if top else None,
+            "candidates": len(span_ranked),
         })
 
-        rank_text = str(expected_rank) if expected_rank else "-"
-        best_text = f"{expected_row['best']:.4f}" if expected_row else "-"
-        print(f"{number:>3}  {pair['query']:<12} {pair['query_span']:<10} "
-              f"{(expected or '-'):<15} {pair['expected_span']:<11} "
-              f"{pair['kind']:<18} {pair['split']:<5} {rank_text:>4} {best_text:>7}  "
-              f"{(results[-1]['top1'] or '-'):<18}")
+        best_text = f"{span_row['best']:.4f}" if span_row else "-"
+        span_flag = "yes" if source_hit else ("no" if source_hit is False else "-")
+        print(f"{number:>3}  {pair['query']:<12} {pair['kind']:<18} {pair['split']:<5} "
+              f"{str(chapter_rank or '-'):>4} {str(span_rank or '-'):>4} {best_text:>7} "
+              f"{(span_row['support'] if span_row else 0):>3} "
+              f"{(span_row['source_range'] if span_row else '-'):<10} {span_flag:<4}  "
+              f"{(top1 or '-'):<18}")
 
     dev = [row for row in results if row["split"] == "dev"]
     test = [row for row in results if row["split"] == "test"]
 
-    print_recall("Recall — dev split (tuning data)", dev)
-    print_recall("Recall — test split (held out)", test)
+    for rule in ("chapter", "span"):
+        print_recall("Recall — dev split (tuning data)", dev, f"{rule}_rank")
+    for rule in ("chapter", "span"):
+        print_recall("Recall — test split (held out)", test, f"{rule}_rank")
+
+    print("\nRegression cases (chapter rank -> span rank)")
+    by_query = {row["query"]: row for row in results}
+    for query in REGRESSION_CASES:
+        row = by_query.get(query)
+        if not row:
+            continue
+        span_flag = "yes" if row["source_span_hit"] else (
+            "no" if row["source_span_hit"] is False else "-")
+        best = f"{row['span_best']:.4f}" if row["span_best"] else "-"
+        print(f"  {query:<12} {str(row['chapter_rank']):>4} -> {str(row['span_rank']):>4}  "
+              f"best {best}  support {row['span_support']:>2}  "
+              f"src {row['source_range'] or '-'}  span-hit {span_flag}")
 
     context_rows = [row for row in results if row["kind"] in CONTEXT_KINDS]
     if context_rows:
         print("\nContextual dependence, scored separately (not in recall)")
         for row in context_rows:
-            if row["expected_best"] is None:
+            if row["span_best"] is None:
                 print(f"  {row['query']:<12} -> {row['expected']:<12} not retrieved")
             else:
-                print(f"  {row['query']:<12} -> {row['expected']:<12} rank "
-                      f"{row['expected_rank'] or '-'} best {row['expected_best']:.4f}")
+                print(f"  {row['query']:<12} -> {row['expected']:<12} "
+                      f"chapter rank {row['chapter_rank'] or '-'} | span rank "
+                      f"{row['span_rank'] or '-'} | best {row['span_best']:.4f}")
 
-    sweep_rows = threshold_sweep(dev)
+    sweep_rows = threshold_sweep([row for row in dev if row["top1_best"] is not None])
     if sweep_rows:
         print(f"\nThreshold sweep on DEV only ({len(sweep_rows)} points)")
         print(f"  {'thresh':>6} {'accept':>6} {'tp':>4} {'fpC':>4} {'ctx':>4} "
@@ -337,15 +414,15 @@ def main(argv=None):
                   f"{row['precision']:>5.2f} {row['recall']:>5.2f} "
                   f"{row['false_positive_rate']:>5.2f}")
 
-    held_out = threshold_metrics(test, HELD_OUT_THRESHOLD)
+    held_out = threshold_metrics([row for row in test if row["top1_best"] is not None],
+                                 HELD_OUT_THRESHOLD)
     if held_out:
         print(f"\nHeld-out TEST at the threshold fixed in advance "
               f"({HELD_OUT_THRESHOLD:.2f}):")
-        print(f"  accepted {held_out['accepted']} of {len(test)} | tp "
-              f"{held_out['true_positives']} | fp-controls "
-              f"{held_out['false_positives_controls']} | accepted-context "
-              f"{held_out['accepted_context']} | precision {held_out['precision']:.2f} "
-              f"| recall {held_out['recall']:.2f} | fpr "
+        print(f"  accepted {held_out['accepted']} | tp {held_out['true_positives']} | "
+              f"fp-controls {held_out['false_positives_controls']} | "
+              f"accepted-context {held_out['accepted_context']} | precision "
+              f"{held_out['precision']:.2f} | recall {held_out['recall']:.2f} | fpr "
               f"{held_out['false_positive_rate']:.2f}")
 
     control_rows = [row for row in results if row["kind"] in CONTROL_KINDS]
@@ -353,9 +430,9 @@ def main(argv=None):
         print("\nControls (what came back anyway)")
         for row in control_rows:
             flag = "" if row["reviewed"] else "  [unreviewed]"
+            best = f"{row['top1_best']:.4f}" if row["top1_best"] is not None else "-"
             print(f"  {row['query']:<12} [{row['kind']:<17}] top-1 "
-                  f"{row['top1']:<17} best {row['top1_best']:.4f}  "
-                  f"chapters hit {row['chapters_retrieved']}{flag}")
+                  f"{(row['top1'] or '-'):<17} best {best}{flag}")
 
     if args.json:
         payload = {
@@ -365,15 +442,21 @@ def main(argv=None):
             "window_overlap": WINDOW_OVERLAP,
             "min_document_frequency": MIN_DOCUMENT_FREQUENCY,
             "held_out_threshold": HELD_OUT_THRESHOLD,
+            "ranking": args.ranking,
+            "tie_tolerance": args.tie_tolerance,
             "labels_reviewed": reviewed,
             "labels_total": len(pairs),
             "results": results,
             "recall": {
-                "dev": recall_metrics(dev),
-                "test": recall_metrics(test),
-                "by_kind": {kind: recall_metrics([row for row in results
-                                                  if row["kind"] == kind])
-                            for kind in RETRIEVAL_KINDS},
+                rule: {
+                    "dev": recall_metrics(dev, f"{rule}_rank"),
+                    "test": recall_metrics(test, f"{rule}_rank"),
+                    "dev_span": span_recall_metrics(dev, f"{rule}_rank"),
+                    "test_span": span_recall_metrics(test, f"{rule}_rank"),
+                    "dev_localization": localization_metrics(dev, f"{rule}_rank"),
+                    "test_localization": localization_metrics(test, f"{rule}_rank"),
+                }
+                for rule in ("chapter", "span")
             },
             "contextual": context_rows,
             "threshold_sweep_dev": sweep_rows,

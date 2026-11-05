@@ -100,8 +100,28 @@ unreviewed labels is printed alongside.
     python evaluate_retrieval.py --cache-index .eval_cache --json eval_result.json
 
 It builds one pooled index (cached in `.eval_cache/` after the first run, so re-scoring
-is seconds rather than minutes), ranks KJV chapters for each query chapter by window
-hits, and prints per-kind recall, the dev threshold sweep, and the held-out result.
+is seconds rather than minutes). For every query chapter the same matched-window evidence
+is ranked by two rules — `chapter` (window-hit count, then best similarity: the original
+rule) and `span` (best similarity, then distinct non-overlapping supports, then coverage,
+with candidates within `--tie-tolerance` treated as ties so one lucky window cannot beat
+real support) — and both are reported, so a scoring change can be compared like-for-like.
+
+Each candidate keeps its evidence: best similarity, number of distinct supporting verse
+ranges, coverage of the candidate chapter, and the source- and query-side verse ranges
+doing the pointing. Three measurements follow from that: source **chapter** recall, source
+**span** recall (does the matched range touch the annotated verses), and target-span
+localization (does the query-side range touch the verses that do the quoting). Annotations
+are used only to score the run; retrieval is never told where the quotation is.
+
+Measured on the current set (69,929 windows, 50 neighbours, tie tolerance 0.01):
+
+    ranking     dev @1   test @1   test @5   partial quotations @5
+    chapter     20/20    7/10      8/10      2/3
+    span        20/20    7/10      9/10      3/3
+
+Regression cases, chapter rank -> span rank: Moroni 10 30 -> 2, Mosiah 12 3 -> 2,
+3 Nephi 20 1 -> 1, Mosiah 14 1 -> 1. The single-verse quotation in Moroni 10:31 is the
+case the change exists for.
 
 ## Output
 
