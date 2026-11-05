@@ -113,15 +113,45 @@ doing the pointing. Three measurements follow from that: source **chapter** reca
 localization (does the query-side range touch the verses that do the quoting). Annotations
 are used only to score the run; retrieval is never told where the quotation is.
 
-Measured on the current set (69,929 windows, 50 neighbours, tie tolerance 0.01):
+Candidate chapters are grouped into deterministic similarity BANDS rather than compared
+pairwise: the highest remaining score anchors a band, every candidate within
+`--tie-tolerance` of that anchor joins it, and the band is ordered by support, coverage,
+then similarity. Pairwise tolerance is not transitive (A ties B, B ties C, A does not tie
+C), which would make the ordering depend on sort behaviour; bands are a total order.
 
-    ranking     dev @1   test @1   test @5   partial quotations @5
-    chapter     20/20    7/10      8/10      2/3
-    span        20/20    7/10      9/10      3/3
+Each candidate also keeps its paired evidence: which query window matched which source
+window and how strongly, not just the two independently merged ranges. That is what later
+verse-level localization and classification will need.
 
-Regression cases, chapter rank -> span rank: Moroni 10 30 -> 2, Mosiah 12 3 -> 2,
-3 Nephi 20 1 -> 1, Mosiah 14 1 -> 1. The single-verse quotation in Moroni 10:31 is the
-case the change exists for.
+A pair may label several independent sources. Each target carries its own reference, verse
+span, relationship kind, confidence, review status and query span, and is scored
+separately; recall is reported twice, crediting any labelled source and the primary target
+only, so multi-source labels cannot silently inflate the headline number. Mosiah 12 quotes
+Isaiah 52:7-10 *and* the Decalogue of Exodus 20:2-4 in the same chapter; crediting one
+source scored a correct retrieval as a miss.
+
+Every control was reviewed against the text and the closest approach recorded. Max control
+similarity is 0.8169 (Ether 1, the Abraham/Isaac land-and-seed formula). Two chapters that
+began as controls, Helaman 5 and Helaman 11, were moved to low-confidence allusions: they
+pattern on the transfiguration and on Psalm 85 without reproducing either.
+
+Measured on the current set (69,929 windows, 50 neighbours, tie tolerance 0.01). Note that
+the label review moved two controls into the positive set, so these denominators differ
+from earlier runs and the numbers are not directly comparable to them:
+
+    ranking     scope        dev @1   test @1   test @5   test @20   partials @5
+    chapter     any source   20/20    8/12      10/12     10/12      2/3
+    chapter     primary      20/20    8/12      9/12      10/12      -
+    span        any source   20/20    10/12     11/12     11/12      3/3
+    span        primary      20/20    9/12      11/12     11/12      -
+
+Regression cases, chapter rank -> span rank: Moroni 10 30 -> 2, Mosiah 12 3 -> 1 (credited
+to its second source, Exodus 20), 3 Nephi 20 1 -> 1, Mosiah 14 1 -> 1. The single-verse
+quotation in Moroni 10:31 is the case the change exists for.
+
+Held out at the 0.90 threshold fixed in advance: 9 accepted, 7 true positives (6 of them
+primary), 0 control false positives, 2 accepted context pairs, precision 0.78, recall 0.58,
+false-positive rate 0.00 over 9 reviewed controls. The threshold remains untuned.
 
 ## Output
 

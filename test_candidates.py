@@ -139,3 +139,60 @@ def test_query_span_hit_checks_the_quoting_verses():
     assert query_span_hit(candidate, "31") is True
     assert query_span_hit(candidate, "30") is False
     assert query_span_hit(candidate, "whole") is True
+
+
+def test_band_ranking_is_transitive_and_order_independent():
+    """A=0.990, B=0.985, C=0.979 with tolerance 0.01.
+
+    Pairwise tolerance is non-transitive here (A~B, B~C, A!~C), which is why the
+    ranking groups candidates into anchor bands instead of comparing pairs.
+    """
+    def candidate(book, best, support):
+        return {"book": book, "chapter": 1, "best": best, "support": support,
+                "coverage": 0.5, "source_intervals": [(1, 2)],
+                "query_intervals": [(1, 2)], "matches": support}
+
+    a = candidate("Isaiah", 0.990, 1)      # weakest support, highest score
+    b = candidate("Malachi", 0.985, 5)     # strongest support
+    c = candidate("Ezekiel", 0.979, 3)     # outside A's band
+
+    forward = rank_candidates({"i": a, "m": b, "e": c}, tie_tolerance=0.01)
+    backward = rank_candidates({"e": dict(c), "m": dict(b), "i": dict(a)}, tie_tolerance=0.01)
+
+    assert [row["book"] for row in forward] == ["Malachi", "Isaiah", "Ezekiel"]
+    assert [row["book"] for row in backward] == ["Malachi", "Isaiah", "Ezekiel"]
+    assert [row["rank"] for row in forward] == [1, 2, 3]
+
+
+def test_band_ranking_side_effect_free_across_permutations():
+    def candidate(book, best, support):
+        return {"book": book, "chapter": 1, "best": best, "support": support,
+                "coverage": 0.5, "source_intervals": [(1, 2)],
+                "query_intervals": [(1, 2)], "matches": support}
+
+    scores = [("A", 0.991, 1), ("B", 0.989, 4), ("C", 0.980, 2), ("D", 0.960, 9)]
+    import itertools
+
+    orders = set()
+    for permutation in itertools.permutations(scores):
+        candidates = {name: candidate(name, best, support)
+                      for name, best, support in permutation}
+        ranked = rank_candidates(candidates, tie_tolerance=0.01)
+        orders.add(tuple(row["book"] for row in ranked))
+
+    assert len(orders) == 1, f"ranking depends on input order: {orders}"
+
+
+def test_paired_evidence_records_which_window_matched_which():
+    meta = [
+        window("Mosiah", 14, 1, 2, corpus="bom"),
+        window("Isaiah", 53, 4, 5),
+        window("Isaiah", 53, 6, 7),
+    ]
+    matches = [match(0.9, 0, 1), match(0.7, 0, 2)]
+
+    candidate = aggregate_candidates(meta, matches)[("Isaiah", 53)]
+
+    assert candidate["pairs"][0] == {"sim": 0.9, "query_range": "1-2", "source_range": "4-5"}
+    assert candidate["pairs"][1]["source_range"] == "6-7"
+    assert candidate["pairs"][0]["sim"] > candidate["pairs"][1]["sim"]

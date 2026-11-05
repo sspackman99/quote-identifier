@@ -20,9 +20,6 @@ Annotated spans are used by the EVALUATION only. Nothing here is told where the
 quotation is; retrieval has to find it.
 """
 
-from functools import cmp_to_key
-
-
 def merge_intervals(intervals):
     """Collapse overlapping inclusive (start, end) pairs into disjoint ranges."""
     ordered = sorted((int(start), int(end)) for start, end in intervals)
@@ -99,12 +96,18 @@ def aggregate_candidates(meta, matches, chapter_sizes=None):
                 "matches": 0,
                 "source_intervals": [],
                 "query_intervals": [],
+                "pairs": [],
             }
 
         candidate["best"] = max(candidate["best"], match["sim"])
         candidate["matches"] += 1
         candidate["source_intervals"].append((target["start_verse"], target["end_verse"]))
         candidate["query_intervals"].append((query["start_verse"], query["end_verse"]))
+        candidate["pairs"].append({
+            "sim": match["sim"],
+            "query_range": f'{query["start_verse"]}-{query["end_verse"]}',
+            "source_range": f'{target["start_verse"]}-{target["end_verse"]}',
+        })
 
     for candidate in candidates.values():
         source = merge_intervals(candidate["source_intervals"])
@@ -119,34 +122,49 @@ def aggregate_candidates(meta, matches, chapter_sizes=None):
         covered = sum(end - start + 1 for start, end in source)
         # Support outside the chapter's own verses cannot exceed 1.0
         candidate["coverage"] = min(1.0, covered / size) if size else 0.0
+        # paired evidence: WHICH query range matched WHICH source range, strongest first
+        candidate["pairs"].sort(key=lambda pair: -pair["sim"])
 
     return candidates
 
 
-def _compare(a, b, tolerance):
-    """Sort: best similarity (within tolerance), then support, coverage, name."""
-    if a["best"] > b["best"] + tolerance:
-        return -1
-    if b["best"] > a["best"] + tolerance:
-        return 1
-    if a["support"] != b["support"]:
-        return -1 if a["support"] > b["support"] else 1
-    if abs(a["coverage"] - b["coverage"]) > 1e-9:
-        return -1 if a["coverage"] > b["coverage"] else 1
-    if abs(a["best"] - b["best"]) > 1e-12:
-        return -1 if a["best"] > b["best"] else 1
-    if (a["book"], a["chapter"]) == (b["book"], b["chapter"]):
-        return 0
-    return -1 if (a["book"], a["chapter"]) < (b["book"], b["chapter"]) else 1
+def rank_candidates(candidates, tie_tolerance=0.01):
+    """Rank candidate chapters with span-aware evidence, in deterministic BANDS.
 
+    Pairwise "within tolerance" comparisons are not transitive: with tolerance
+    0.01, A=0.990 ties B=0.985 and B=0.985 ties C=0.980, but A does not tie C, so
+    a comparator-based sort can depend on input order. Instead:
 
-def rank_candidates(candidates, tie_tolerance=0.02):
-    """Rank candidate chapters with span-aware evidence."""
-    ordered = list(candidates.values())
-    ordered.sort(key=cmp_to_key(lambda a, b: _compare(a, b, tie_tolerance)))
+      1. sort by best similarity;
+      2. take the highest remaining score as the band ANCHOR and group every
+         candidate within `tie_tolerance` of that anchor;
+      3. order that band by support, then coverage, then best similarity, then name;
+      4. repeat with the remaining candidates.
+
+    Band membership is defined by the anchor, so the ordering is a total order and
+    independent of the order candidates arrive in.
+    """
+    remaining = sorted(
+        candidates.values(),
+        key=lambda candidate: (-candidate["best"], candidate["book"], candidate["chapter"]),
+    )
+
+    ordered = []
+    while remaining:
+        anchor = remaining[0]["best"]
+        band = [c for c in remaining if anchor - c["best"] <= tie_tolerance + 1e-12]
+        in_band = {id(c) for c in band}
+        remaining = [c for c in remaining if id(c) not in in_band]
+
+        band.sort(key=lambda c: (-c["support"], -c["coverage"], -c["best"],
+                                 c["book"], c["chapter"]))
+        ordered.extend(band)
+
     for position, candidate in enumerate(ordered, 1):
         candidate["rank"] = position
+
     return ordered
+
 
 
 def span_hit(candidate, annotated_span):

@@ -199,7 +199,11 @@ def threshold_metrics(rows, threshold):
 
     accepted = [row for row in scored if row["top1_best"] >= threshold]
     true_positives = [row for row in accepted
-                      if row["kind"] in RETRIEVAL_KINDS and row.get("top1") == row.get("expected")]
+                      if row["kind"] in RETRIEVAL_KINDS
+                      and row.get("top1") in {t["ref"] for t in row.get("expected_targets", [])}]
+    primary_matches = [row for row in accepted
+                       if row["kind"] in RETRIEVAL_KINDS
+                       and row.get("top1") == row.get("expected")]
     fp_controls = [row for row in accepted if row["kind"] in CONTROL_KINDS]
     fp_context = [row for row in accepted if row["kind"] in CONTEXT_KINDS]
     other = [row for row in accepted
@@ -214,6 +218,7 @@ def threshold_metrics(rows, threshold):
         "threshold": round(threshold, 3),
         "accepted": len(accepted),
         "true_positives": len(true_positives),
+        "true_positives_primary": len(primary_matches),
         "false_positives_controls": len(fp_controls),
         "accepted_context": len(fp_context),
         "false_positives_other": len(other),
@@ -258,6 +263,13 @@ def print_recall(title, rows, rank_field):
               f"@20={overall['recall_at_20']:.0%}  "
               f"| span-hit @1={span['recall_at_1']:.0%} @5={span['recall_at_5']:.0%} "
               f"| query-span @1={local['recall_at_1']:.0%}")
+        primary_field = ("primary_chapter_rank" if rank_field.startswith("chapter")
+                         else "primary_span_rank")
+        primary = recall_metrics(rows, primary_field)
+        if primary:
+            print(f"  {'primary target only':<18} n={primary['pairs']:<3} "
+                  f"@1={primary['recall_at_1']:.0%}  @5={primary['recall_at_5']:.0%}  "
+                  f"@20={primary['recall_at_20']:.0%}")
 
 
 def main(argv=None):
@@ -311,24 +323,39 @@ def main(argv=None):
         span_ranked = rank_candidates(span_candidates, args.tie_tolerance)
 
         expected = pair["expected"]
+        targets = pair["expected_targets"]
         chapter_rank = span_rank = None
+        primary_chapter_rank = primary_span_rank = None
         chapter_row = span_row = None
-        source_hit = query_hit = None
+        source_hit = primary_hit = query_hit = None
+        hit_target = None
 
-        if expected:
-            expected_book, expected_chapter = parse_ref(expected)
+        for target in targets:
+            target_book, target_chapter = parse_ref(target["ref"])
 
-            for rank, row in enumerate(chapter_ranked, 1):
-                if (row["book"], row["chapter"]) == (expected_book, expected_chapter):
-                    chapter_rank, chapter_row = rank, row
-                    break
+            chapter_position = next(
+                (rank for rank, row in enumerate(chapter_ranked, 1)
+                 if (row["book"], row["chapter"]) == (target_book, target_chapter)),
+                None,
+            )
+            candidate = span_candidates.get((target_book, target_chapter))
+            position = candidate["rank"] if candidate else None
+            hit = span_hit(candidate, target["span"]) if candidate else None
 
-            candidate = span_candidates.get((expected_book, expected_chapter))
-            if candidate is not None:
-                span_rank = candidate["rank"]
-                span_row = candidate
-                source_hit = span_hit(candidate, pair["expected_span"])
-                query_hit = query_span_hit(candidate, pair["query_span"])
+            if position is not None and (span_rank is None or position < span_rank):
+                span_rank, span_row, hit_target = position, candidate, target
+                source_hit = hit
+                query_hit = query_span_hit(candidate, target["query_span"])
+            if chapter_position is not None and (
+                    chapter_rank is None or chapter_position < chapter_rank):
+                chapter_rank, chapter_row = chapter_position, next(
+                    row for row in chapter_ranked
+                    if (row["book"], row["chapter"]) == (target_book, target_chapter))
+
+            if target["primary"]:
+                primary_chapter_rank = chapter_position
+                primary_span_rank = position
+                primary_hit = hit
 
         top = span_ranked[0] if span_ranked else None
         top1 = f"{top['book']} {top['chapter']}" if top else None
@@ -344,13 +371,19 @@ def main(argv=None):
             "query_span": pair["query_span"],
             "expected_span": pair["expected_span"],
             "note": pair["note"],
+            "expected_targets": targets,
             "chapter_rank": chapter_rank,
             "chapter_best": chapter_row["best"] if chapter_row else None,
+            "primary_chapter_rank": primary_chapter_rank,
+            "primary_span_rank": primary_span_rank,
+            "primary_span_hit": primary_hit,
+            "hit_target": hit_target["ref"] if hit_target else None,
             "span_rank": span_rank,
             "span_best": span_row["best"] if span_row else None,
             "span_support": span_row["support"] if span_row else 0,
             "span_coverage": span_row["coverage"] if span_row else None,
             "source_range": span_row["source_range"] if span_row else None,
+            "source_pairs": span_row["pairs"][:10] if span_row else [],
             "query_range": span_row["query_range"] if span_row else None,
             "source_span_hit": source_hit,
             "query_span_hit": query_hit,
@@ -362,11 +395,14 @@ def main(argv=None):
 
         best_text = f"{span_row['best']:.4f}" if span_row else "-"
         span_flag = "yes" if source_hit else ("no" if source_hit is False else "-")
+        credit = ""
+        if hit_target and hit_target["ref"] != pair["expected"]:
+            credit = f"  [credited: {hit_target['ref']}]"
         print(f"{number:>3}  {pair['query']:<12} {pair['kind']:<18} {pair['split']:<5} "
               f"{str(chapter_rank or '-'):>4} {str(span_rank or '-'):>4} {best_text:>7} "
               f"{(span_row['support'] if span_row else 0):>3} "
               f"{(span_row['source_range'] if span_row else '-'):<10} {span_flag:<4}  "
-              f"{(top1 or '-'):<18}")
+              f"{(top1 or '-'):<18}{credit}")
 
     dev = [row for row in results if row["split"] == "dev"]
     test = [row for row in results if row["split"] == "test"]
@@ -403,13 +439,14 @@ def main(argv=None):
     sweep_rows = threshold_sweep([row for row in dev if row["top1_best"] is not None])
     if sweep_rows:
         print(f"\nThreshold sweep on DEV only ({len(sweep_rows)} points)")
-        print(f"  {'thresh':>6} {'accept':>6} {'tp':>4} {'fpC':>4} {'ctx':>4} "
+        print(f"  {'thresh':>6} {'accept':>6} {'tp':>4} {'tpP':>4} {'fpC':>4} {'ctx':>4} "
               f"{'other':>5} {'prec':>5} {'rec':>5} {'fpr':>5}")
         for row in sweep_rows:
             if row["accepted"] == 0:
                 continue
             print(f"  {row['threshold']:>6.2f} {row['accepted']:>6} "
-                  f"{row['true_positives']:>4} {row['false_positives_controls']:>4} "
+                  f"{row['true_positives']:>4} {row['true_positives_primary']:>4} "
+                  f"{row['false_positives_controls']:>4} "
                   f"{row['accepted_context']:>4} {row['false_positives_other']:>5} "
                   f"{row['precision']:>5.2f} {row['recall']:>5.2f} "
                   f"{row['false_positive_rate']:>5.2f}")
@@ -419,7 +456,8 @@ def main(argv=None):
     if held_out:
         print(f"\nHeld-out TEST at the threshold fixed in advance "
               f"({HELD_OUT_THRESHOLD:.2f}):")
-        print(f"  accepted {held_out['accepted']} | tp {held_out['true_positives']} | "
+        print(f"  accepted {held_out['accepted']} | tp {held_out['true_positives']} "
+              f"(primary {held_out['true_positives_primary']}) | "
               f"fp-controls {held_out['false_positives_controls']} | "
               f"accepted-context {held_out['accepted_context']} | precision "
               f"{held_out['precision']:.2f} | recall {held_out['recall']:.2f} | fpr "

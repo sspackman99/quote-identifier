@@ -168,11 +168,12 @@ def test_expected_spans_exist_in_the_king_james_bible():
     index = _corpus_index(KJV_CANDIDATES, "kjv", "kjv.txt")
 
     for pair in all_pairs():
-        if pair["expected_span"] == "whole" or not pair["expected"]:
-            continue
-        book, chapter = parse_ref(pair["expected"])
-        missing = _expand(pair["expected_span"]) - index[(book, chapter)]
-        assert not missing, f"{pair['expected']} has no verses {sorted(missing)}"
+        for target in pair["expected_targets"]:
+            if target["span"] == "whole":
+                continue
+            book, chapter = parse_ref(target["ref"])
+            missing = _expand(target["span"]) - index[(book, chapter)]
+            assert not missing, f"{target['ref']} has no verses {sorted(missing)}"
 
 
 # -------------------------------------------------
@@ -215,11 +216,22 @@ def test_rank_chapters_handles_empty_candidates():
     assert rank_chapters({}) == []
 
 
-def _row(query, expected, rank, top1, top1_best, kind="quotation", split="dev"):
+def _row(query, expected, rank, top1, top1_best, kind="quotation", split="dev",
+         also_expected=None):
     # both ranking rules are carried on a result row; these tests exercise the
     # metric arithmetic, so the two ranks are set to the same value
+    targets = []
+    if expected:
+        targets.append({"ref": expected, "span": "whole", "kind": kind,
+                        "query_span": "whole", "confidence": "high",
+                        "reviewed": True, "note": "", "primary": True})
+    for extra in also_expected or []:
+        targets.append({"ref": extra, "span": "whole", "kind": kind,
+                        "query_span": "whole", "confidence": "high",
+                        "reviewed": True, "note": "", "primary": False})
     return {"query": query, "expected": expected, "kind": kind, "split": split,
             "expected_rank": rank, "chapter_rank": rank, "span_rank": rank,
+            "primary_span_rank": rank, "expected_targets": targets,
             "top1": top1, "top1_best": top1_best}
 
 
@@ -274,3 +286,63 @@ def test_threshold_metrics_separates_controls_from_context():
 
 def test_threshold_metrics_returns_none_without_scores():
     assert threshold_metrics([], 0.9) is None
+
+
+# -------------------------------------------------
+# Multi-source labels
+# -------------------------------------------------
+def test_a_chapter_may_list_several_independent_sources():
+    """Mosiah 12 quotes Isaiah 52 AND the Decalogue; both are separate targets."""
+    pair = next(p for p in all_pairs() if p["query"] == "Mosiah 12")
+    targets = {t["ref"]: t for t in pair["expected_targets"]}
+
+    assert targets["Isaiah 52"]["primary"] is True
+    assert targets["Isaiah 52"]["span"] == "7-10"
+    assert targets["Exodus 20"]["primary"] is False
+    assert targets["Exodus 20"]["span"] == "2-4"
+    assert targets["Exodus 20"]["reviewed"] is True
+
+
+def test_each_target_carries_its_own_query_span():
+    """A second source can be quoted in different verses of the same chapter."""
+    pair = next(p for p in all_pairs() if p["query"] == "Helaman 5")
+    spans = {t["ref"]: t["query_span"] for t in pair["expected_targets"]}
+
+    assert spans == {"Luke 9": "28-29", "Acts 2": "45"}
+
+
+def test_a_secondary_target_is_credited_but_not_counted_as_primary():
+    rows = [_row("Mosiah 12", "Isaiah 52", 2, "Exodus 20", 0.96,
+                 kind="partial_quotation", also_expected=["Exodus 20"])]
+
+    metrics = threshold_metrics(rows, 0.90)
+
+    assert metrics["true_positives"] == 1
+    assert metrics["true_positives_primary"] == 0
+    assert metrics["recall"] == pytest.approx(1.0)
+
+
+def test_unlabelled_top_hit_is_still_a_false_positive_with_multi_source_labels():
+    rows = [_row("Mosiah 12", "Isaiah 52", 5, "Judges 5", 0.96,
+                 kind="partial_quotation", also_expected=["Exodus 20"])]
+
+    metrics = threshold_metrics(rows, 0.90)
+
+    assert metrics["true_positives"] == 0
+    assert metrics["false_positives_other"] == 1
+
+
+def test_every_control_has_been_reviewed_against_the_text():
+    controls = [pair for pair in all_pairs() if pair["kind"] in CONTROL_KINDS]
+
+    assert controls
+    for pair in controls:
+        assert pair["reviewed"], f"control {pair['query']} is still unreviewed"
+        assert pair["note"], f"control {pair['query']} has no evidence note"
+
+
+def test_reviewed_chapters_that_pattern_on_a_passage_are_positives():
+    by_query = {pair["query"]: pair for pair in all_pairs()}
+
+    assert by_query["Helaman 5"]["kind"] == "allusion"
+    assert by_query["Helaman 11"]["kind"] == "allusion"
