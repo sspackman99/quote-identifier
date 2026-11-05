@@ -227,6 +227,49 @@ candidate it was never given.
 Nothing here changes retrieval: scores, threshold, spans and ranking are untouched, and
 the classifier is not yet wired into `main.py`'s CSV.
 
+### First measured run
+
+Qwen3.5-9B-Q4-Vision on ozai, `--candidate expected`, 34 of 35 labelled positives
+(the one skip is Alma 7, whose source chapter retrieval never surfaced at all):
+
+    expected kind        n    correct   what it said instead
+    quotation           21    21        -
+    partial_quotation    3     1        quotation x2
+    paraphrase           3     0        quotation x3
+    allusion             4     1        paraphrase x3
+    interpretation       3     0        quotation x2, paraphrase x1
+    total               34    23
+
+    source-span agreement 2/2 where both sides gave one
+    flagged for review    1/34
+
+The errors are concentrated on the boundaries rather than on facts. Full-chapter
+quotations are recognised perfectly; the disagreements are (a) quotation versus
+partial quotation, which this model treats as one category, and (b) paraphrase and
+interpretation, which it tends to promote to quotation when the wording really is
+close.
+
+Two of those look like label errors rather than classifier errors, and they are the
+most useful thing the run produced: 3 Nephi 13 and 14 reproduce Matthew 6 and 7
+closely, and Mosiah 15 and Alma 42 reuse Isaiah 53 and Genesis 3:24 wording, yet all
+four are labelled paraphrase or interpretation. A rubric is needed before this number
+means anything: at what point does reused wording stop being a quotation?
+
+The single review flag was a genuine error the policy caught: with the wrong query
+verses in the prompt (see below) the model called Mosiah 12 -> Exodus 20 `unrelated`
+at confidence 1.00, and `unrelated` at similarity 0.95 escalated it automatically.
+
+Retrieved mode, sampled at 8 pairs, behaves differently and as expected: the two
+controls shown to it were judged correctly (Mosiah 4 `unrelated` 0.95, 3 Nephi 4
+`paraphrase` 0.65 with a review flag), and the positives it got wrong were ones where
+retrieval had already chosen the wrong chapter (Moroni 10 was shown 1 Corinthians 12
+and answered `unrelated`). Two requests out of 42 exceeded the client timeout.
+
+A harness bug this run exposed: a multi-source pair was given the primary target's
+query verses for every source, so Mosiah 12 -> Exodus 20 was presented as the
+Isaiah 52 verses against the Decalogue. Each target now brings its own query span,
+and the same pair classifies as `quotation` 0.98.
+
 ## Output
 
 `top_matches.csv` holds the highest-scoring candidate pairs:

@@ -39,7 +39,7 @@ DEPENDENT = ("quotation", "partial_quotation", "paraphrase", "allusion", "interp
 
 MATCHED_WINDOW_LIMIT = 8
 DEFAULT_MODEL = "local-classifier"
-DEFAULT_TIMEOUT = 120
+DEFAULT_TIMEOUT = 180  # this model can take a while to think
 REVIEW_CONFIDENCE_FLOOR = 0.75
 CONTRADICTION_SIMILARITY = 0.85
 

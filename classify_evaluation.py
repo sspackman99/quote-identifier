@@ -135,6 +135,7 @@ def candidate_for(meta, embeddings, index, sizes, pair, texts, mode="retrieved")
     summary = summarise_targets(resolved)
 
     chosen_span = None
+    chosen_query_span = pair["query_span"]
     if mode == "expected":
         target = summary["credited"]["target"] if summary["credited"] else None
         if target is None:
@@ -144,10 +145,11 @@ def candidate_for(meta, embeddings, index, sizes, pair, texts, mode="retrieved")
         if top is None:
             return None
         chosen_span = target["span"]
+        chosen_query_span = target.get("query_span") or pair["query_span"]
     else:
         top = ranked[0]
 
-    query_span = pair["query_span"]
+    query_span = chosen_query_span
     if query_span and query_span != "whole":
         query_verses = expand_span(query_span)
         query_start, query_end = min(query_verses), max(query_verses)
@@ -173,7 +175,7 @@ def candidate_for(meta, embeddings, index, sizes, pair, texts, mode="retrieved")
     case = build_case(
         query={
             "ref": pair["query"],
-            "span": pair["query_span"] or "whole chapter",
+            "span": chosen_query_span or "whole chapter",
             "text": verse_texts(texts, "bom", query_book, query_chapter,
                                 query_start, query_end),
             "context": context_texts(texts, "bom", query_book, query_chapter,
