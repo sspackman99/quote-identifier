@@ -1,0 +1,16 @@
+# Runtime dependencies, derived from the imports in this repo (there was no
+# manifest before). The ML stack is only needed for the embedding path
+# (similarity.py); the pytest suites need numpy + faiss (+ pandas for the CSV
+# exporter) and nothing else.
+
+numpy
+pandas
+nltk
+datasketch
+sentence-transformers
+faiss-cpu
+scikit-learn
+torch
+
+# Test-only
+pytest

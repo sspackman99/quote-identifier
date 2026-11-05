@@ -5,6 +5,11 @@ from typing import List, Dict, Optional
 # Optional lemmatization (recommended)
 USE_LEMMATIZATION = True
 
+# Defaults so tokenize() cannot hit NameError when lemmatization is off or
+# nltk is missing.
+lemmatizer = None
+nltk_available = False
+
 if USE_LEMMATIZATION:
     try:
         import nltk
@@ -23,6 +28,7 @@ if USE_LEMMATIZATION:
         # NLTK not available - lemmatization will be skipped
         lemmatizer = None
         nltk_available = False
+
 
 
 # -------------------------------------------------
