@@ -342,3 +342,32 @@ def test_secondary_equal_to_primary_is_dropped():
     result = parse_response(response(relationship="paraphrase",
                                      secondary_relationship="paraphrase"))
     assert result["secondary_relationship"] == ""
+
+
+def test_extent_guard_downgrades_an_excerpt_called_a_quotation():
+    """Small models call excerpts quotations; a measured coverage decides instead."""
+    case = dict(CASE, retrieval={"best": 0.95, "support": 3, "coverage": 0.35})
+    result = RelationshipClassifier(lambda system, user: response(relationship="quotation")
+                                    ).classify(case)
+
+    assert result["relationship"] == "partial_quotation"
+    assert result["guard_applied"] == "extent"
+    assert result["guard_original_relationship"] == "quotation"
+    assert "35%" in result["guard_note"]
+
+
+def test_extent_guard_leaves_a_full_quotation_alone():
+    case = dict(CASE, retrieval={"best": 0.98, "support": 5, "coverage": 0.92})
+    result = RelationshipClassifier(lambda system, user: response(relationship="quotation")
+                                    ).classify(case)
+
+    assert result["relationship"] == "quotation"
+    assert result["guard_applied"] == ""
+
+
+def test_extent_guard_never_promotes_a_label():
+    case = dict(CASE, retrieval={"best": 0.95, "coverage": 0.95})
+    result = RelationshipClassifier(lambda system, user: response(relationship="allusion")
+                                    ).classify(case)
+
+    assert result["relationship"] == "allusion"

@@ -42,6 +42,7 @@ MATCHED_WINDOW_LIMIT = 8
 DEFAULT_MODEL = "local-classifier"
 DEFAULT_TIMEOUT = 180  # this model can take a while to think
 REVIEW_CONFIDENCE_FLOOR = 0.75
+COVERAGE_FOR_FULL_QUOTATION = 0.60
 CONTRADICTION_SIMILARITY = 0.85
 
 SYSTEM_PROMPT = """You classify the relationship between two scriptural passages.
@@ -87,6 +88,23 @@ Boundaries that decide most cases:
    dominates, answer quotation or partial_quotation and record the comment as secondary.
 5. A passage may relate to more than one source. Judge the pair you are given, against its
    own verses, and do not let a second relationship dilute the answer.
+
+Two tests to apply before answering, because they decide the cases that go wrong:
+
+EXTENT TEST (before quotation or partial_quotation).
+Count how much of the CITED SOURCE passage the query reproduces, and compare it with the
+size of that source passage.
+  - reproduces most of the cited source passage -> quotation
+  - reproduces only part of it, even a long or memorable part -> partial_quotation
+Coverage of the source decides, not the amount of text in the query. A query can be long
+and still quote only an excerpt; a query can be short and still reproduce a whole short
+psalm or paragraph.
+
+DOMINANCE TEST (before interpretation).
+If the passage both quotes and explains, compare how much of the query is reproduction
+and how much is explanation. The larger share decides the label; the other relationship
+goes in secondary_relationship. Exposition wrapped around one quoted clause is
+interpretation; a quoted block with a sentence of comment is a quotation.
 
 How to decide:
 1. The MATCHED evidence below is the only thing that can support quotation or
@@ -297,6 +315,33 @@ def parse_response(text):
     }
 
 
+def apply_extent_guard(result, case):
+    """Enforce the rubric's extent rule when the evidence can measure it.
+
+    The rubric says a quotation reproduces the source substantially, and an excerpt
+    is a partial quotation however long or memorable. A small model keeps calling
+    excerpts quotations even when told the rule, so where retrieval can measure how
+    much of the cited source the match covers, that measurement decides - downwards
+    only. The guard never promotes a label.
+    """
+    coverage = case.get("retrieval", {}).get("coverage")
+    result["coverage_of_source"] = coverage
+
+    if (result["relationship"] == "quotation" and coverage is not None
+            and coverage < COVERAGE_FOR_FULL_QUOTATION):
+        result["guard_original_relationship"] = result["relationship"]
+        result["relationship"] = "partial_quotation"
+        result["guard_applied"] = "extent"
+        result["guard_note"] = (
+            f"matched evidence covers {coverage:.0%} of the cited source passage, under "
+            f"the {COVERAGE_FOR_FULL_QUOTATION:.0%} floor for calling the passage fully quoted"
+        )
+    else:
+        result["guard_applied"] = ""
+
+    return result
+
+
 def apply_review_policy(result, case):
     """Escalate to human review where the evidence and the label disagree.
 
@@ -343,6 +388,7 @@ class RelationshipClassifier:
         result["context_supplied"] = bool(
             case["query"].get("context") or case["source"].get("context")
         )
+        result = apply_extent_guard(result, case)
         return apply_review_policy(result, case)
 
 

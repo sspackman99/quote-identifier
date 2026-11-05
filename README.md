@@ -277,6 +277,30 @@ The single review flag was a genuine error the policy caught: with the wrong que
 verses in the prompt (see below) the model called Mosiah 12 -> Exodus 20 `unrelated`
 at confidence 1.00, and `unrelated` at similarity 0.95 escalated it automatically.
 
+### After the rubric: what changed and what did not
+
+Relabelling under rubric 1.0 lifted the expected-kind score from 23/34 to 26/34, but
+three of those gains are the relabelled Matthew passages, so the honest reading is that
+the labels moved toward the model on evidence (49% / 84% / 86% of the source's four-word
+sequences reproduced), not that the model improved.
+
+Teaching the extent and dominance tests in the prompt changed nothing measurable on the
+eight disagreement pairs (0/8), and the model kept describing excerpts as "a substantial,
+continuous portion of the source" — it applies the quotation definition without checking
+the size of the source passage. A deterministic guard now applies the rubric's extent
+rule where retrieval can measure it: a `quotation` whose matched evidence covers less
+than 60% of the cited source passage is recorded as `partial_quotation`, with
+`guard_original_relationship` and `guard_note` preserving what the model said and why it
+was overridden. The guard only ever downgrades. It fixed one of the eight (Mosiah 12 ->
+Exodus 20).
+
+What remains is concentrated: excerpts called quotations when the match covers most of a
+short chapter (3 Nephi 20, 3 Nephi 19), one paraphrase/partial boundary (Moroni 7), and
+dominance questions where exposition and quotation are interleaved (Mosiah 15, Alma 42,
+2 Nephi 2). A chapter-level coverage proxy cannot see the difference between "cited the
+whole of a short psalm" and "quoted three verses out of twenty-six"; span-level coverage
+against the cited verses is the obvious next measurement.
+
 Retrieved mode, sampled at 8 pairs, behaves differently and as expected: the two
 controls shown to it were judged correctly (Mosiah 4 `unrelated` 0.95, 3 Nephi 4
 `paraphrase` 0.65 with a review flag), and the positives it got wrong were ones where
