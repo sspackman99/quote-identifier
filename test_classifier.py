@@ -281,7 +281,7 @@ def test_http_completer_sends_a_bounded_non_thinking_request(monkeypatch):
 
     complete("system", "user")
 
-    assert captured["body"]["max_tokens"] == 700
+    assert captured["body"]["max_tokens"] == 1200
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert captured["body"]["temperature"] == 0.0
     assert captured["timeout"] == 11
@@ -300,3 +300,19 @@ def test_http_completer_can_enable_thinking_when_asked(monkeypatch):
                    thinking=True)("system", "user")
 
     assert "chat_template_kwargs" not in captured["body"]
+
+
+def test_empty_answer_after_thinking_raises_a_clear_error(monkeypatch):
+    """A budget spent entirely on reasoning must not look like a parse failure."""
+
+    def fake_urlopen(request, timeout=None):
+        return _FakeHTTPResponse({"choices": [{"message": {
+            "content": "", "reasoning_content": "Thinking Process: ...", }}]})
+
+    monkeypatch.setattr("classifier.urllib.request.urlopen", fake_urlopen)
+    complete = http_completer(url="http://example/v1/chat/completions", model="m")
+
+    with pytest.raises(RuntimeError) as error:
+        complete("system", "user")
+
+    assert "spent the whole token budget" in str(error.value)

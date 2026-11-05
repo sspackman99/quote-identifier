@@ -314,7 +314,7 @@ def http_completer(url=None, model=None, timeout=None, api_key=None,
     model = model or os.environ.get("QI_LLM_MODEL", DEFAULT_MODEL)
     timeout = timeout or int(os.environ.get("QI_LLM_TIMEOUT", DEFAULT_TIMEOUT))
     api_key = api_key or os.environ.get("QI_LLM_KEY", "")
-    max_tokens = max_tokens or int(os.environ.get("QI_LLM_MAX_TOKENS", 700))
+    max_tokens = max_tokens or int(os.environ.get("QI_LLM_MAX_TOKENS", 1200))
 
     if not url:
         raise ValueError("no classifier endpoint: pass url or set QI_LLM_URL")
@@ -329,8 +329,8 @@ def http_completer(url=None, model=None, timeout=None, api_key=None,
                 {"role": "user", "content": user_prompt},
             ],
         }
-        # reasoning models burn the whole budget thinking; classification is a
-        # short answer, so thinking is off unless explicitly asked for
+        # advisory only: some builds honour enable_thinking, this one does not, so
+        # the token budget below is what actually keeps a thinking model in check
         if not thinking:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         body = json.dumps(payload).encode()
@@ -350,8 +350,20 @@ def http_completer(url=None, model=None, timeout=None, api_key=None,
             raise RuntimeError(f"classifier endpoint unreachable at {url}: {error.reason}")
 
         try:
-            return payload["choices"][0]["message"]["content"]
+            choice = payload["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError):
             raise RuntimeError(f"unexpected completion payload: {str(payload)[:400]}")
+
+        content = message.get("content") or ""
+        if not content.strip():
+            if message.get("reasoning_content"):
+                raise RuntimeError(
+                    "the model produced no answer: it spent the whole token budget "
+                    "thinking. Raise QI_LLM_MAX_TOKENS (default 1200)."
+                )
+            raise RuntimeError("the model returned an empty message")
+
+        return content
 
     return complete
