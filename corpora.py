@@ -77,13 +77,40 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
 
 
+# Book ids readers actually use, where the slug would be ugly ("d-c" for D&C).
+BOOK_ID_OVERRIDES = {"D&C": "dc"}
+
+
+def book_id_for(name: str) -> str:
+    return BOOK_ID_OVERRIDES.get(name.strip(), slugify(name))
+
+
 def _register(corpus_id: str, names: List[str]) -> None:
     for name in names:
-        _BOOK_INDEX.setdefault(name, {})[corpus_id] = slugify(name)
+        _BOOK_INDEX.setdefault(name, {})[corpus_id] = book_id_for(name)
 
 
 _register("bom", BOM_BOOKS)
 _register("kjv", KJV_BOOKS)
+
+# Doctrine and Covenants is one book of sections: the section number is carried in
+# the `chapter` field, so refs read "D&C 76:22" rather than a paragraph number.
+DC_BOOKS = ["D&C"]
+# Pearl of Great Price in its canonical order. It is several books, and references
+# are written with the book name: "Moses 1:1", "Abraham 3:25".
+PGP_BOOKS = ["Moses", "Abraham", "Joseph Smith-Matthew", "Joseph Smith-History"]
+
+_register("dc", DC_BOOKS)
+_register("pgp", PGP_BOOKS)
+
+BOOK_ALIASES.update({
+    "Doctrine and Covenants": "D&C",
+    "D and C": "D&C",
+    "Joseph Smith - Matthew": "Joseph Smith-Matthew",
+    "Joseph Smith—Matthew": "Joseph Smith-Matthew",
+    "Joseph Smith - History": "Joseph Smith-History",
+    "Joseph Smith—History": "Joseph Smith-History",
+})
 
 
 def books_for(corpus_id: str) -> List[str]:
@@ -109,7 +136,7 @@ def canonical_book(corpus_id: str, name: str) -> Tuple[str, str]:
             f"{cleaned!r} is not a known book of corpus {corpus_id!r}"
         )
 
-    return slugify(cleaned), cleaned
+    return book_id_for(cleaned), cleaned
 
 
 # -------------------------------------------------
@@ -200,6 +227,16 @@ def _bom_is_title_line(line: str) -> bool:
 
 def parse_bom_text(text: str) -> List[Dict]:
     """Parse the Gutenberg Book of Mormon into canonical verse records."""
+    # The licence block after the canon is not scripture. Left in, it is appended
+    # to the last verse (Moroni 10:34), turning one verse into ~350 lines and
+    # feeding "project gutenberg" windows into retrieval and into the classifier.
+    end_marker = re.search(
+        r"^\*\*\*\s*END OF THE PROJECT GUTENBERG.*$", text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    if end_marker:
+        text = text[:end_marker.start()]
+
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
     start = None
@@ -335,12 +372,215 @@ def parse_kjv_text(text: str) -> List[Dict]:
 
 
 # -------------------------------------------------
+# Doctrine and Covenants (sacred-texts edition)
+# -------------------------------------------------
+
+_DC_VERSE_RE = re.compile(r"^\[(?P<section>\d{1,3}):(?P<verse>\d{1,3})\]\s*(?P<text>.*)$")
+# A verse whose bracket marker was lost looks like "76:22 And the Lord said…".
+_DC_BARE_VERSE_RE = re.compile(r"^\d{1,3}:\d{1,3}\s")
+
+
+def parse_dc_text(text: str) -> List[Dict]:
+    """Parse the sacred-texts Doctrine and Covenants: '[section:verse] text'.
+
+    Verse markers are authoritative here. The edition's section headings are page
+    commentary — "1. Revelation through Joseph Smith, Hiram, Ohio, November 1831."
+    — and one of them, section 78, has lost its number entirely, so headings
+    cannot establish section identity; the bracket markers can.
+
+    A line that starts with "[" and does not parse raises, because that is what a
+    changed verse format looks like. Heading and footnote lines between verses are
+    recognised by shape (they end with a full stop); anything else raises rather
+    than being guessed at.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    start = next(
+        (index for index, line in enumerate(lines) if _DC_VERSE_RE.match(line.strip())),
+        None,
+    )
+    if start is None:
+        raise CorpusFormatError("no '[section:verse]' marker found in the text")
+
+    records = []
+    for number, raw in enumerate(lines[start:], start=start + 1):
+        line = raw.strip()
+        if not line:
+            continue
+
+        match = _DC_VERSE_RE.match(line)
+        if match:
+            records.append(make_verse(
+                "dc", book="D&C",
+                chapter=int(match.group("section")),
+                verse=int(match.group("verse")),
+                text=match.group("text").strip(),
+                source_ref=f"[{match.group('section')}:{match.group('verse')}]",
+                source_line=number,
+            ))
+            continue
+
+        if line.startswith("["):
+            raise CorpusFormatError(
+                f"unparseable verse marker at line {number}: {line[:80]!r}"
+            )
+        if _DC_BARE_VERSE_RE.match(line):
+            raise CorpusFormatError(
+                f"verse-like line without a bracket marker at line {number}: "
+                f"{line[:80]!r}"
+            )
+        # otherwise: an edition heading or footnote for the section around it.
+        # Headings wrap across lines ("…July 1830. See" / "History of the Church
+        # 1:104-8."), so their shape cannot be pinned down more tightly than this.
+
+    return records
+
+
+# -------------------------------------------------
+# Pearl of Great Price (sacred-texts edition)
+# -------------------------------------------------
+
+_PGP_HEADER_RE = re.compile(
+    r"^Pearl of Great Price:\s*(?P<book>[^:]+):\s*Chapter\s+(?P<chapter>\d+)\s*$"
+)
+_PGP_VERSE_RE = re.compile(r"^(?P<verse>\d{1,3})\s+(?P<text>\S.*)$")
+# Some verses put the number on its own line, with the text on the next one.
+_PGP_BARE_VERSE_RE = re.compile(r"^(?P<verse>\d{1,3})$")
+_PGP_NAV_LINES = {"Sacred Texts", "|", "Mormonism", "Index"}
+
+
+def _repair_mojibake(text: str) -> str:
+    """Undo the double encoding in this scrape ('bowsÃ·and', 'Godâ€™s').
+
+    The bytes are UTF-8 decoded as cp1252/latin-1 once too often, so re-encoding
+    to the single-byte codec and decoding as UTF-8 recovers the intended
+    characters. cp1252 is tried first because it is what produced the 'â€™'
+    sequences; latin-1 covers the rest.
+    """
+    if not any(marker in text for marker in ("Ã", "â", "Â")):
+        return text
+    for codec in ("cp1252", "latin-1"):
+        try:
+            return text.encode(codec).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+    return text
+
+
+def parse_pgp_text(text: str) -> List[Dict]:
+    """Parse the sacred-texts Pearl of Great Price.
+
+    The scrape interleaves navigation ("Sacred Texts | Mormonism", "Next: … »")
+    with the text; verses are hard-wrapped, so a line without a number continues
+    the verse above it; and the whole Joseph Smith-History block appears twice, so
+    the first copy is kept and later copies of an already-seen chapter are
+    skipped.
+
+    Gaps in the verse numbering are preserved as they are — this edition really is
+    missing Joseph Smith-History 37 and 69 — while a repeated verse number inside
+    one chapter raises. Text is repaired from the file's double encoding, which
+    otherwise puts "Ã·" in the middle of verses.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    records = []
+    pending = None
+    book = None
+    chapter = None
+    seen_chapters = set()
+    seen_verses = set()
+    ignoring_duplicate = False
+
+    def flush():
+        nonlocal pending
+        if pending is None:
+            return
+        body = _repair_mojibake(pending["text"]).strip()
+        if not body:
+            raise CorpusFormatError(
+                f"verse {pending['book']} {pending['chapter']}:{pending['verse']} "
+                f"has no text (line {pending['line']})"
+            )
+        records.append(make_verse(
+            "pgp", book=pending["book"], chapter=pending["chapter"],
+            verse=pending["verse"], text=body,
+            source_ref=f"{pending['book']} {pending['chapter']}:{pending['verse']}",
+            source_line=pending["line"],
+        ))
+        pending = None
+
+    for number, raw in enumerate(lines, start=1):
+        line = raw.strip()
+        if not line:
+            continue
+
+        header = _PGP_HEADER_RE.match(line)
+        if header:
+            flush()
+            name = header.group("book").strip()
+            chapter_number = int(header.group("chapter"))
+            key = (name, chapter_number)
+
+            if key in seen_chapters:
+                ignoring_duplicate = True
+                book, chapter = None, None
+                continue
+
+            seen_chapters.add(key)
+            ignoring_duplicate = False
+            book, chapter = name, chapter_number
+            seen_verses = set()
+            continue
+
+        if line in _PGP_NAV_LINES or line.startswith(("« Previous", "Next:", "Previous:")):
+            continue
+        if ignoring_duplicate:
+            continue
+
+        if book is None:
+            raise CorpusFormatError(
+                f"verse outside a chapter heading at line {number}: {line[:60]!r}"
+            )
+
+        numbered = _PGP_VERSE_RE.match(line)
+        bare = _PGP_BARE_VERSE_RE.match(line)
+
+        if numbered or bare:
+            flush()
+            verse_number = int((numbered or bare).group("verse"))
+            if verse_number in seen_verses:
+                raise CorpusFormatError(
+                    f"verse {book} {chapter}:{verse_number} appears twice "
+                    f"(line {number})"
+                )
+            seen_verses.add(verse_number)
+            pending = {
+                "book": book, "chapter": chapter, "verse": verse_number,
+                "text": numbered.group("text") if numbered else "",
+                "line": number,
+            }
+            continue
+
+        if pending is None:
+            raise CorpusFormatError(
+                f"unrecognised line with no verse to continue at line {number}: "
+                f"{line[:60]!r}"
+            )
+        pending["text"] = f"{pending['text']} {line}".strip()
+
+    flush()
+    return records
+
+
+# -------------------------------------------------
 # Corpus registry
 # -------------------------------------------------
 
 CORPUS_PARSERS = {
     "bom": parse_bom_text,
     "kjv": parse_kjv_text,
+    "dc": parse_dc_text,
+    "pgp": parse_pgp_text,
 }
 
 

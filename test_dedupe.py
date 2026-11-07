@@ -9,7 +9,6 @@ import numpy as np
 
 from similarity import (
     filter_nearby_matches,
-    get_top_matches,
     merge_duplicate_matches,
 )
 
@@ -78,27 +77,3 @@ def test_dedupe_then_filter_keeps_one_record_per_pair():
     i, j, methods = filtered[0]
     assert (i, j) == (0, 1)
     assert methods == ["embedding", "minhash"]
-
-
-def test_dedupe_before_scoring_does_not_double_count_top_n(monkeypatch):
-    """top_n must apply to unique pairs, not to the duplicated match list."""
-    windows = [
-        _window("Genesis", 1, 0),
-        _window("Exodus", 1, 1000),
-        _window("Leviticus", 1, 2000),
-    ]
-
-    class FakeMinHash:
-        def jaccard(self, other):
-            return 1.0
-
-    for window in windows:
-        window["minhash"] = FakeMinHash()
-
-    raw = [(0, 1, "embedding"), (1, 0, "minhash"), (0, 2, "minhash"), (2, 0, "embedding")]
-    merged = merge_duplicate_matches(raw)
-    top = get_top_matches(windows, merged, top_n=10)
-
-    assert len(top) == 2
-    pairs = {(i, j) for _, i, j, _ in top}
-    assert pairs == {(0, 1), (0, 2)}

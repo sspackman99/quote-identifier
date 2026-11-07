@@ -416,3 +416,55 @@ def test_a_quotation_with_almost_no_reproduction_is_not_downgraded_to_partial():
     assert result["needs_review"] is True
     assert any("quotation cannot be supported" in reason
                for reason in result["review_reasons"])
+
+
+# ---------------------------------------------------------------------------
+# Tolerant parsing: the model's prose is valid, its JSON sometimes is not.
+# ---------------------------------------------------------------------------
+
+def test_unescaped_quotes_inside_a_string_are_repaired():
+    text = ('{"relationship": "quotation", "confidence": 0.9, "query_span": "6", '
+            '"source_span": "22", "secondary_relationship": "", '
+            '"explanation": "The phrase "mine hand" is reproduced verbatim.", '
+            '"evidence": ["Thus saith the Lord God"], "needs_review": false}')
+
+    result = parse_response(text)
+
+    assert result["relationship"] == "quotation"
+    assert result["explanation"] == 'The phrase "mine hand" is reproduced verbatim.'
+
+
+def test_a_raw_newline_inside_a_string_is_repaired():
+    text = ('{"relationship": "paraphrase", "confidence": 0.8, "query_span": "1", '
+            '"source_span": "2", "explanation": "first line\nsecond line", '
+            '"evidence": ["x"], "needs_review": false}')
+
+    result = parse_response(text)
+
+    assert result["explanation"] == "first line\nsecond line"
+
+
+def test_a_trailing_comma_is_repaired():
+    text = ('{"relationship": "unrelated", "confidence": 0.7, "query_span": "", '
+            '"source_span": "", "explanation": "no relation", "evidence": [],}')
+
+    result = parse_response(text)
+
+    assert result["relationship"] == "unrelated"
+
+
+def test_valid_json_is_never_reinterpreted():
+    text = json.dumps({"relationship": "allusion", "confidence": 0.6,
+                       "query_span": "3", "source_span": "4",
+                       "explanation": "evokes the psalm", "evidence": ["a phrase"],
+                       "needs_review": True})
+
+    result = parse_response(text)
+
+    assert result["relationship"] == "allusion"
+    assert result["evidence"] == ["a phrase"]
+
+
+def test_unrecoverable_json_still_raises():
+    with pytest.raises(ClassifierResponseError):
+        parse_response('{"relationship": "quotation", "confidence": ')

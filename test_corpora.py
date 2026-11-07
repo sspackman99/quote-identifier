@@ -51,8 +51,15 @@ def test_unknown_book_is_an_error_not_a_silent_record():
 
 
 def test_corpora_are_registered_with_parsers():
-    assert set(available_corpora()) == {"bom", "kjv"}
-    assert set(CORPUS_PARSERS) == {"bom", "kjv"}
+    assert set(available_corpora()) == {"bom", "kjv", "dc", "pgp"}
+    assert set(CORPUS_PARSERS) == {"bom", "kjv", "dc", "pgp"}
+
+
+def test_dc_and_pgp_books_are_registered_with_readable_ids():
+    assert canonical_book("dc", "Doctrine and Covenants") == ("dc", "D&C")
+    assert canonical_book("pgp", "Joseph Smith - History") == (
+        "joseph-smith-history", "Joseph Smith-History",
+    )
 
 
 def test_unknown_corpus_is_rejected():
@@ -418,3 +425,174 @@ def test_real_kjv_book_and_verse_counts():
     assert indexed[("isaiah", 53, 1)]["text"].startswith("Who hath believed")
     assert indexed[("malachi", 4, 6)]["book"] == "Malachi"
     assert indexed[("matthew", 1, 1)]["book"] == "Matthew"
+
+
+def test_gutenberg_licence_is_not_parsed_as_scripture():
+    """The footer block must not be appended to Moroni 10:34.
+
+    Left in, the licence turns the final verse into hundreds of lines and feeds
+    "project gutenberg" windows into retrieval and into the classifier.
+    """
+    text = (
+        "THE FOURTH BOOK OF NEPHI (4 Nephi)\n\n"
+        "4 Nephi Chapter 1\n\n"
+        "1:1 And it came to pass that the disciples went forth.\n"
+        "1:2 And they did all things common among them.\n\n"
+        "*** END OF THE PROJECT GUTENBERG EBOOK THE BOOK OF MORMON ***\n\n"
+        "Section 1. General Terms of Use\n"
+        "Project Gutenberg is a registered trademark.\n"
+    )
+
+    verses = CORPUS_PARSERS["bom"](text)
+
+    last = verses[-1]
+    assert last["verse"] == 2
+    assert "common among them" in last["text"]
+    assert "gutenberg" not in last["text"].lower()
+    assert "trademark" not in last["text"].lower()
+    assert len(verses) == 2
+
+
+def test_parse_is_unchanged_when_there_is_no_licence_marker():
+    text = (
+        "THE FOURTH BOOK OF NEPHI (4 Nephi)\n\n"
+        "4 Nephi Chapter 1\n\n"
+        "1:1 And it came to pass that the disciples went forth.\n"
+    )
+
+    verses = CORPUS_PARSERS["bom"](text)
+
+    assert len(verses) == 1
+    assert "disciples went forth" in verses[0]["text"]
+
+
+DC_SAMPLE = """\
+Doctrine and Covenants of the Church of Jesus Christ of the Latter-Day Saints, at sacred-texts.com
+
+THE
+ DOCTRINE AND COVENANTS
+
+1. Revelation through Joseph Smith, Hiram, Ohio, November 1, 1831.
+
+[1:1] Hearken, O ye people of my church, saith the voice of him who dwells on high.
+[1:2] For verily the voice of the Lord is unto all men.
+
+Doctrine and Covenants of the Church of Jesus Christ of the Latter-Day Saints, at sacred-texts.com
+
+Revelation through Joseph Smith, Hiram, Ohio, March 1832. See
+History of the Church 1:257.
+
+[2:1] Hearken, O ye elders of my church, and give ear to my word.
+"""
+
+PGP_SAMPLE = """\
+Pearl of Great Price: Moses: Chapter 1
+1 The words of God, which he spake unto Moses at a time when Moses was caught up.
+2 And he saw God face to face, and he talked with him, and the glory of God was upon Moses;
+because of the transgression of my people.
+
+Sacred Texts
+|
+Mormonism
+Next: Pearl of Great Price: Moses: Chapter 2 »
+
+Pearl of Great Price: Moses: Chapter 2
+3 And it came to pass that Moses looked upon Satan and said: Who art thou?
+4 And now, Moses, my son, I will speak unto thee concerning this earth.
+
+« Previous: Pearl of Great Price: Moses: Chapter 1
+Index
+
+Pearl of Great Price: Moses: Chapter 1
+1 The words of God, which he spake unto Moses at a time when Moses was caught up.
+2 And he saw God face to face, and he talked with him, and the glory of God was upon Moses;
+"""
+
+
+def test_dc_verses_are_read_from_bracket_markers():
+    verses = CORPUS_PARSERS["dc"](DC_SAMPLE)
+
+    assert [(v["book"], v["chapter"], v["verse"]) for v in verses] == [
+        ("D&C", 1, 1), ("D&C", 1, 2), ("D&C", 2, 1),
+    ]
+    assert "Hearken, O ye people" in verses[0]["text"]
+    assert verses[0]["book_id"] == "dc"
+
+
+def test_dc_unnumbered_and_wrapped_headings_are_tolerated():
+    """Section 78 lost its number in this edition; headings also wrap."""
+    verses = CORPUS_PARSERS["dc"](DC_SAMPLE)
+
+    assert verses[-1]["chapter"] == 2, "the unnumbered heading still yields section 2"
+    assert "elders of my church" in verses[-1]["text"]
+
+
+def test_dc_verse_without_its_bracket_raises():
+    broken = DC_SAMPLE.replace("[1:2] For verily", "1:2 For verily")
+
+    with pytest.raises(CorpusFormatError) as error:
+        CORPUS_PARSERS["dc"](broken)
+
+    assert "bracket" in str(error.value)
+
+
+def test_pgp_headers_verses_and_wrapped_lines():
+    verses = CORPUS_PARSERS["pgp"](PGP_SAMPLE)
+
+    assert [(v["book"], v["chapter"], v["verse"]) for v in verses] == [
+        ("Moses", 1, 1), ("Moses", 1, 2), ("Moses", 2, 3), ("Moses", 2, 4),
+    ]
+    assert "because of the transgression" in verses[1]["text"], "wrapped line joined"
+
+
+def test_pgp_duplicate_chapter_block_is_skipped():
+    verses = CORPUS_PARSERS["pgp"](PGP_SAMPLE)
+
+    assert sum(1 for v in verses if v["chapter"] == 1) == 2, "the repeat adds nothing"
+
+
+def test_pgp_navigation_lines_are_not_text():
+    verses = CORPUS_PARSERS["pgp"](PGP_SAMPLE)
+
+    for verse in verses:
+        assert "Sacred Texts" not in verse["text"]
+        assert "Mormonism" not in verse["text"]
+        assert "Next:" not in verse["text"]
+
+
+def test_pgp_double_encoded_characters_are_repaired():
+    """The scrape double-encodes punctuation: '’' arrives as 'â€™'."""
+    text = PGP_SAMPLE.replace("face to face", "face to face, Godâ€™s word")
+
+    verses = CORPUS_PARSERS["pgp"](text)
+
+    assert "God’s word" in verses[1]["text"]
+    assert "â€" not in verses[1]["text"]
+
+
+DATA = Path(__file__).parent / "data"
+
+
+def test_real_doctrine_and_covenants_parses_completely():
+    path = DATA / "dc.txt"
+    if not path.exists():
+        pytest.skip("no dc.txt")
+    verses = load_corpus_text("dc", path.read_text(encoding="utf-8-sig"))
+
+    assert len(verses) == 3654
+    assert len({v["chapter"] for v in verses}) == 138
+    assert verses[0]["chapter"] == 1 and verses[0]["verse"] == 1
+    assert verses[-1]["chapter"] == 138
+
+
+def test_real_pearl_of_great_price_parses_completely():
+    path = DATA / "pgp.txt"
+    if not path.exists():
+        pytest.skip("no pgp.txt")
+    verses = load_corpus_text("pgp", path.read_text(encoding="utf-8-sig"))
+
+    assert len(verses) == 622
+    for book in ("Moses", "Abraham", "Joseph Smith-Matthew", "Joseph Smith-History"):
+        assert any(v["book"] == book for v in verses), book
+    assert sum(1 for v in verses if v["book"] == "Joseph Smith-History") == 75
+    assert not any("Ã" in v["text"] for v in verses)
