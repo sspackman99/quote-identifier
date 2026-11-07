@@ -216,3 +216,16 @@ __marimo__/
 
 # retrieval evaluation cache (embeddings + window metadata)
 .eval_cache/
+
+# --- generated run artifacts (regenerate with run_matrix.py / classify_matrix.py) ---
+.embed_cache/
+pairs/
+classifications/
+*.jsonl
+
+# --- generated reports, landing page and visualisation data ---
+/index.html
+/*_report.html
+viz/data.js
+viz/data.json
+viz/matrix_classifications.csv
