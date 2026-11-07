@@ -69,6 +69,74 @@ pointed at it, with best and mean similarity, plus whether Isaiah 53 was retriev
 Common trigrams are filtered once over the pooled corpus so both sides lose the same
 boilerplate. MinHash is not used here: this stage is about embedding retrieval.
 
+That script answers one query chapter at a time and writes JSON. `main.py` now does the
+same comparison for the whole corpus, and writes the same pair CSV as the within-corpus
+run:
+
+    QI_EMBEDDINGS_URL=http://10.77.1.117:8001/v1/embeddings \
+    QI_EMBEDDINGS_MODEL=embeddinggemma-300m \
+    python main.py --corpus data/bom.txt --corpus-id bom \
+        --corpus-b data/kjv.txt --corpus-id-b kjv \
+        --pairs cross --output cross_pairs_bom_kjv.csv
+
+- `--pairs cross` searches each Book of Mormon window against a Bible-only index, and
+  never the reverse: the direction is stated by the flags, and the Bible is the source.
+  `--pairs within` compares each corpus to itself; `--pairs both` does both.
+- The search is deliberately NOT over a pooled index. A Book of Mormon window's nearest
+  neighbours are usually other Book of Mormon windows — a parallel account, or the same
+  passage quoted again — so a pooled top-5 can contain no Bible window at all for a
+  verse that quotes Isaiah. Restricting the searched index to the other corpus makes the
+  question "which Bible passage is closest to this verse".
+- Common trigrams are filtered per corpus, not over the pool. The 20% threshold counts
+  chapters: 20% of 239 Book of Mormon chapters is 48, 20% of the 1,428 pooled chapters
+  is 285, so one pooled count would let the commonest phrases through on one side. On
+  the real pair this selects 76 phrases in the Book of Mormon and 12 in the Bible, and
+  removes 5.8% of window tokens.
+- Both corpora must embed through ONE model. Mixing vectors from two models inside a
+  single run is meaningless, and the run metadata records which endpoint and model
+  produced them, per corpus.
+
+`classify_pairs.py` reads the resulting file unchanged; give it `--source-corpus-id kjv`
+so the Bible side is presented as the source:
+
+    python classify_pairs.py --input cross_pairs_bom_kjv.csv \
+        --source-corpus data/kjv.txt --source-corpus-id kjv \
+        --min-similarity 0.80
+
+### The whole matrix
+
+Four corpora means ten runs: four within-corpus and six directed cross runs. They
+share preprocessing and embeddings, so they are one command, not ten:
+
+    QI_EMBEDDINGS_URL=http://host:8001/v1/embeddings \
+    QI_EMBEDDINGS_MODEL=embeddinggemma-300m \
+    python run_matrix.py --output-dir pairs --cache .embed_cache/embeddings.sqlite3
+
+    bom-bom  kjv-kjv  dc-dc  pgp-pgp
+    bom-kjv  dc-kjv   pgp-kjv
+    dc-bom   pgp-bom  dc-pgp
+
+- The pair name is directed: `dc-bom` means D&C windows are the query and Book of
+  Mormon windows are the source, which is also how `classify_pairs.py` reads it.
+  `dc-pgp` is the one genuinely ambiguous direction (both corpora are 1830s
+  restorations); add `--pair pgp:dc` to run the other way too.
+- State is built once for the corpora any pair touches, then each pair is ranked
+  from it. `--pair` restricts the run to some of the ten.
+- The embedding cache is content-addressed by text and model, so a re-run after a
+  parser fix recomputes only the passages that actually changed. On this corpus the
+  ten runs need 79,162 window embeddings once, instead of ~300,000 without a cache.
+- Each pair writes `<query>-<source>.csv` with the same columns as before, plus a
+  `.meta.json`, and `pairs/manifest.json` records every pair's row count, max,
+  median, p90 and how many rows sit above 0.80 and 0.70 — that is what the
+  classification cutoffs are chosen from.
+
+`classify_matrix.py` walks those files in priority order (cross-corpus first, the
+Bible-against-itself run last), with a higher cutoff for within-corpus runs because
+they are full of near-duplicate passages:
+
+    python classify_matrix.py --input-dir pairs --output-dir classifications \
+        --cross-cutoff 0.80 --within-cutoff 0.85 --budget 4000
+
 ### Retrieval evaluation
 
 `evaluate_retrieval.py` scores the retriever against a labelled set
@@ -287,8 +355,54 @@ candidate it was never given.
     QI_LLM_URL=http://host:8000/v1/chat/completions QI_LLM_MODEL=my-model \
         python classify_evaluation.py --candidate expected --json classification.json
 
-Nothing here changes retrieval: scores, threshold, spans and ranking are untouched, and
-the classifier is not yet wired into `main.py`'s CSV.
+Nothing here changes retrieval: scores, threshold, spans and ranking are untouched.
+
+### Classifying the pair list
+
+`classify_pairs.py` is the bridge from retrieval to classification. It reads a pair
+CSV (default `top_matches_pairs.csv`), takes rows in descending cosine order, and
+writes one classification per passage pair:
+
+    python classify_pairs.py --dry-run                       # selection counts + first prompt
+    QI_LLM_URL=http://host:8000/v1/chat/completions \
+    QI_LLM_MODEL=my-model \
+    python classify_pairs.py --min-similarity 0.80
+
+- **Orientation.** The canonically earlier side is passage B (the source), the later
+  side is A (the query that may be quoting): within a canon the later text is the one
+  doing the quoting. Each pair is classified once, in that fixed direction, so a
+  pair cannot be counted twice with two different labels.
+- **Collapsing.** The window grid reports one passage pair many times (overlapping
+  windows). Rows are collapsed to distinct verse-span pairs before any model call;
+  every supporting window is still passed as MATCHED evidence, so the retrieval
+  signal is kept and only the repeated call is dropped. On the Book of Mormon run:
+  70,641 rows → 60,266 distinct verse-span pairs.
+- **Cost is the cutoff.** Calls are the expensive thing, so the walk is bounded by
+  `--min-similarity` and `--limit`. Measured on that run, pairs still to classify:
+
+      cosine >= 0.95      10
+      cosine >= 0.90      24
+      cosine >= 0.85      84
+      cosine >= 0.80     482   (302 distinct chapter pairs; 88 same-chapter)
+      cosine >= 0.75   2,843
+      cosine >= 0.70  13,221
+
+  At ~12 s per call on Qwen3.5-9B (measured: 3 calls in 36 s), 0.80 is about 1.6
+  hours and 0.70 about 44. A full walk of the file is not a sensible target.
+- **Resume.** Every answer is appended to a JSONL journal (`--journal`), so a killed
+  or stopped run continues where it left off and never pays twice for a call. A
+  failed answer is journaled with its error and does not stop the walk; re-running
+  re-attempts only the rows that never succeeded.
+- **Output** (`classifications.csv`): the pair's cosine and references, `relationship`,
+  `secondary_relationship`, `confidence`, `needs_review` with `review_reasons`, the
+  classifier's own `query_span`/`source_span`, any `guard_applied`, the measured
+  `reproduced_share` and `extent_reading`, `explanation`, `evidence`, `model`,
+  `rubric_version`, and `error`.
+
+Reproduction is measured against the matched verse span (the cited source passage),
+not the whole source chapter. For a one-verse source the measurement is close to
+binary — either that verse's wording is in the query or it is not — so the extent
+guard has very little room to move there.
 
 ### First measured run
 
@@ -363,18 +477,41 @@ and the same pair classifies as `quotation` 0.98.
 
 ## Output
 
-`top_matches.csv` holds the highest-scoring candidate pairs:
+`top_matches.csv` holds one row per candidate passage PAIR. Retrieval runs
+top-k per source window in both directions; the output collapses a pair to a
+single row, because cosine similarity is symmetric and the two directions carry
+the same passages and the same score.
 
-    score, methods, text_1, book_1, chapter_1, start_verse_1, end_verse_1,
-    text_2, book_2, chapter_2, start_verse_2, end_verse_2
+    cosine_similarity, rank_1, rank_2,
+    corpus_1, book_id_1, book_1, chapter_1, verse_1, end_verse_1, ref_1, text_1,
+    corpus_2, book_id_2, book_2, chapter_2, verse_2, end_verse_2, ref_2, text_2
 
-`methods` lists every retriever that found the pair (`embedding`, `minhash`). Each pair
-appears once: the two retrievers and both directions (A->B, B->A) are collapsed into one
-row. `--no-dedupe` restores the raw per-method, per-direction rows.
+- `cosine_similarity` is the score, and it is the whole score: cosine similarity
+  between the two window embeddings (the index is inner-product over
+  L2-normalized vectors). MinHash, vocabulary overlap and the speaker-marker
+  boost that used to make up a composite score are gone from this pipeline, so a
+  row is reproducible from its own two embeddings.
+- `rank_1` is where side 2 stood among side 1's candidates; `rank_2` is where
+  side 1 stood among side 2's. They differ often — in the Book of Mormon run
+  13,498 of 18,644 mutually found pairs ranked each other differently — which is
+  why both are kept instead of one being discarded with the duplicate row.
+- A blank `rank_N` means that side ranked the pair outside its top-k. Keeping
+  the pair anyway is deliberate: most pairs (51,997 of 70,641 on that run) are
+  found from one direction only, so a pair is written whenever EITHER direction
+  retrieved it.
+- Sides are ordered by window index, so the file is deterministic and a pair's
+  orientation does not depend on its score.
+- `--top-k` (default 5) is how many candidates each window contributes. There is
+  no global row cap: a strong match near the end of the corpus cannot be
+  displaced by a cluster of near-duplicates earlier in it, which is what a
+  global top-750 cut did.
+- Self-matches and near-overlaps (same book and chapter, under 200 tokens apart)
+  are excluded, and exclusion does not shorten a ranking when further candidates
+  exist.
 
-Candidate pairs are still window pairs, and windows overlap, so the same passage pair can
-legitimately appear more than once with different verse spans. Collapsing those belongs
-with context expansion, where a span means something.
+Rows are still window pairs, and windows overlap, so the same passage pair can
+legitimately appear more than once with different verse spans. Collapsing those
+belongs with context expansion, where a span means something.
 
 ## Windowing
 
@@ -410,9 +547,75 @@ Measured on the Book of Mormon (239 chapters, 17,857 windows, 535,710 window tok
 That last row is why `MIN_DOCUMENT_FREQUENCY` is 0.20 and not 0.01: on this corpus 1% of
 239 chapters means "in 3 chapters", which is a far looser bar than 1% of 17,857 windows.
 
-Effect on the top 750: 606 of 665 reference pairs are shared; 59 appear only under the
+Effect on the previous 750-row output cap: 606 of 665 reference pairs were shared; 59 appear only under the
 document metric and 58 only under the legacy one, including some high-scoring pairs in
 both directions. `--filter-metric occurrence` reproduces the old behaviour exactly.
+
+## The matrix run, the classifications, and the exports
+
+### One embedding pass per pair type
+
+    python run_matrix.py --cache .embed_cache/embeddings.sqlite3
+
+Ten pair types — four within-corpus (bom, kjv, dc, pgp) and six directed cross-corpus
+passes — each written to `pairs/<a>-<b>.csv`, with `pairs/manifest.json` recording rows,
+max, median, p90, counts above 0.80 and 0.70, and same-chapter rows. 492,936 pair rows
+in total. The SQLite cache means a re-run costs no embedding calls.
+
+### Classifying them
+
+    python classify_matrix.py --journal-dir classifications
+
+Walks the pair files cross-corpus first, collapses window pairs to distinct verse
+spans, orients the canonically earlier text as source B and the later one as query A,
+and writes one classification per span pair to `classifications/<pair>.csv`, with a
+resumable JSONL journal beside it. Cutoffs are 0.85 within a corpus and 0.80 across,
+because a within-corpus ranking is full of near-duplicates.
+
+Measured on the full run: 3,047 model calls, 3,046 classified, one deterministic
+failure (Mosiah 11:17-18 → Mosiah 9:14), 25 malformed answers repaired, 182 flagged for
+review, median confidence 0.95. Labels: quotation 1,422 · partial quotation 1,069 ·
+paraphrase 496 · allusion 4 · interpretation 0 · shared_vocabulary 10 · unrelated 45.
+
+### The export
+
+    python build_exports.py
+
+writes three things:
+
+- `matrix_classifications.csv` — 3,047 rows × 31 columns: pair, cosine, both sides
+  parsed into corpus/book/chapter/verse/end_verse/ref, relationship,
+  secondary_relationship, confidence, needs_review, review_reasons, reproduced_share,
+  extent_reading, the classifier's own spans, guard_applied, explanation, evidence,
+  model, rubric_version, error, and query_testament/source_testament.
+- `viz/data.js` (and `data.json`) — 60 book nodes, 185 book-to-book edges, 3,046 pairs
+  and 3,850 unique verse spans, so the page can show both passages without shipping the
+  corpora.
+- `viz/matrix_classifications.csv` — the same table beside the page, for the download
+  button.
+
+The Bible is one classification run but two groups in the export: each book maps to the
+Old Testament (28 books in the graph) or the New Testament (17), so the page paints them
+separately and the CSV names the testament on both sides.
+
+### The view
+
+`viz/index.html` is one self-contained file — no CDN, no build step — that reads
+`data.js`:
+
+- books are nodes sized by connection count, coloured by corpus; lines are book pairs,
+  width by count and colour by dominant label;
+- click a book for its neighbours, a neighbour for the passage pairs, a pair for the two
+  passages with the classifier's reasoning behind a disclosure;
+- within-book repetition is listed in the book's panel rather than drawn as a ring;
+- filters for corpus (the two testaments are separate), label, cosine floor, minimum
+  connection count and free-text search;
+- a breadcrumb trail back to "All books", and Escape steps back one level;
+- drag a node to pin it, double-click to release it, ⟲ resets pan and zoom;
+- full-screen toggle; on phones the results panel is a draggable sheet with peek, split
+  and tall stops, and the filter sheet swipes down to dismiss.
+
+Deployment to a Jekyll site is in `viz/README.md`.
 
 ## Tests
 

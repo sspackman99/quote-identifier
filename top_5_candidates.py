@@ -7,15 +7,22 @@ MIN_TOKEN_DISTANCE = 200
 MAX_SEARCH_K = 50
 
 
-def find_top_5_embedding_candidates(windows, index, embeddings):
+def find_top_5_embedding_candidates(windows, index, embeddings, top_k=TOP_CANDIDATES,
+                                   query_ids=None, target_ids=None):
     """
-    For each source window, find up to 5 candidates ranked by cosine similarity.
+    For each source window, find up to `top_k` candidates ranked by cosine similarity.
 
     Args:
         windows: List of window dicts with embeddings and metadata (book, chapter,
                 start_token_index, text, etc.)
         index: FAISS index over normalized embeddings (IndexFlatIP)
-        embeddings: NumPy array of embeddings (shape: [num_windows, dim])
+        embeddings: NumPy array of embeddings, one row per entry in query_ids
+                (shape: [len(query_ids), dim])
+        top_k: How many candidates to keep per source window (default 5)
+        query_ids: window ids to search from, in row order of `embeddings`
+                (default: every window)
+        target_ids: window id behind each row of `index` (default: every window,
+                i.e. the index covers the full window list)
 
     Returns:
         List of candidate records, one per (source, candidate) pair.
@@ -29,24 +36,35 @@ def find_top_5_embedding_candidates(windows, index, embeddings):
     candidate window id. Self-matches and near-overlap matches (same book and
     chapter, less than MIN_TOKEN_DISTANCE tokens apart) are excluded, and
     exclusion does not shorten the result when further valid candidates exist.
+
+    `query_ids` / `target_ids` are what let one window list be searched against a
+    SUBSET of windows — the cross-corpus case, where a Book of Mormon window must
+    be answered from the Bible index alone.
     """
     candidates = []
 
-    if len(windows) == 0:
+    if len(windows) == 0 or len(embeddings) == 0:
         return candidates
 
-    # Search wide enough that self-matches and near-overlaps can be dropped
-    # without falling short of TOP_CANDIDATES.
-    k = min(len(windows), MAX_SEARCH_K)
+    if query_ids is None:
+        query_ids = range(len(windows))
+    if target_ids is None:
+        target_ids = range(len(windows))
+    query_ids = list(query_ids)
+    target_ids = list(target_ids)
 
-    for i, emb in enumerate(embeddings):
-        D, I = index.search(np.array([emb]), k)
+    # Search wide enough that self-matches and near-overlaps can be dropped
+    # without falling short of top_k.
+    k = min(len(target_ids), MAX_SEARCH_K)
+
+    for row, i in enumerate(query_ids):
+        D, I = index.search(np.array([embeddings[row]]), k)
 
         # IndexFlatIP returns the inner product (embeddings are L2-normalized),
         # so no sign flip: D is the cosine similarity itself. Sort by
         # similarity descending, then by window id ascending for stable ties.
         ranked = sorted(
-            ((float(sim), int(j)) for sim, j in zip(D[0], I[0])),
+            ((float(sim), int(target_ids[j])) for sim, j in zip(D[0], I[0])),
             key=lambda pair: (-pair[0], pair[1]),
         )
 
@@ -85,10 +103,40 @@ def find_top_5_embedding_candidates(windows, index, embeddings):
                 "cosine_similarity": cos_sim,
             })
 
-            if rank == TOP_CANDIDATES:
+            if rank == top_k:
                 break
 
     return candidates
+
+
+def find_candidates_between(windows, embeddings, query_ids, target_ids, top_k=TOP_CANDIDATES):
+    """Top-k candidates for each query window, searched ONLY among target windows.
+
+    This is the cross-corpus search. Pooling two corpora into one index and
+    filtering afterwards is not equivalent: a Book of Mormon window's nearest
+    neighbours are usually other Book of Mormon windows (the same passage quoted
+    elsewhere, or a parallel account), so the Bible chapter it actually quotes
+    can sit far outside its top-k. Searching the target corpus alone makes the
+    question "which Bible passage is closest to this verse" instead of "which of
+    70,000 windows is closest".
+    """
+    import faiss
+
+    embeddings = np.asarray(embeddings, dtype="float32")
+    target_positions = np.asarray(list(target_ids), dtype="int64")
+    query_positions = np.asarray(list(query_ids), dtype="int64")
+
+    if len(target_positions) == 0 or len(query_positions) == 0:
+        return []
+
+    subset = embeddings[target_positions]
+    index = faiss.IndexFlatIP(subset.shape[1])
+    index.add(subset)
+
+    return find_top_5_embedding_candidates(
+        windows, index, embeddings[query_positions], top_k=top_k,
+        query_ids=query_positions, target_ids=target_positions,
+    )
 
 
 def export_top_5_candidates_to_csv(candidates, filepath="top_5_embedding_candidates.csv"):

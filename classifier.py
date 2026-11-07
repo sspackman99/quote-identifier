@@ -169,8 +169,12 @@ def build_case(query, source, matched_windows, retrieval=None, context_radius=2,
     return case
 
 
-def render_prompt(case):
-    """Render the case as a prompt. Matched and contextual text never merge."""
+def render_prompt(case, repair_note=None):
+    """Render the case as a prompt. Matched and contextual text never merge.
+
+    `repair_note` is set only when a previous answer to the same case could not be
+    parsed, so the retry costs one extra call rather than losing the pair.
+    """
     query = case["query"]
     source = case["source"]
     retrieval = case.get("retrieval", {})
@@ -240,6 +244,16 @@ def render_prompt(case):
         "",
         "Classify the relationship of A to B and return the JSON object.",
     ]
+
+    if repair_note:
+        sections += [
+            "",
+            "YOUR PREVIOUS ANSWER WAS REJECTED",
+            f"reason: {repair_note}",
+            "Answer again with the JSON object only, no prose around it, and escape "
+            "double quotes inside string values (or leave those words unquoted).",
+        ]
+
     return "\n".join(sections)
 
 
@@ -281,9 +295,64 @@ def _extract_object(text):
     raise ClassifierResponseError(f"unbalanced JSON in response: {text[:200]!r}")
 
 
+def _repair_json_text(text):
+    """Escape the quotes and newlines a small model leaves unescaped in strings.
+
+    Models routinely emit evidence as `"he said "Come" to them"` — correct prose,
+    invalid JSON. A structural lookahead separates a real closing quote (one
+    followed by `,` `:` `}` or `]`) from a literal one, which gets escaped
+    instead. Trailing commas are dropped as well.
+
+    This only ever runs after `json.loads` has already rejected the text, so
+    well-formed answers are never reinterpreted.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    length = len(text)
+
+    for index, character in enumerate(text):
+        if escaped:
+            out.append(character)
+            escaped = False
+            continue
+        if character == "\\":
+            out.append(character)
+            escaped = True
+            continue
+        if character == '"':
+            if not in_string:
+                in_string = True
+                out.append(character)
+                continue
+            look = index + 1
+            while look < length and text[look] in " \t\r\n":
+                look += 1
+            if look >= length or text[look] in ",:}]":
+                in_string = False
+                out.append(character)
+            else:
+                out.append('\\"')
+            continue
+        if character == "\n" and in_string:
+            out.append("\\n")
+            continue
+        out.append(character)
+
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
 def parse_response(text):
     """Parse and validate one model response into a structured result."""
-    payload = json.loads(_extract_object(text))
+    candidate = _extract_object(text)
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError as first_error:
+        repaired = _repair_json_text(candidate)
+        try:
+            payload = json.loads(repaired)
+        except json.JSONDecodeError:
+            raise ClassifierResponseError(f"unparseable JSON: {first_error}") from None
 
     relationship = str(payload.get("relationship", "")).strip().lower().replace(" ", "_")
     if relationship not in RELATIONSHIPS:
@@ -419,8 +488,8 @@ class RelationshipClassifier:
         self._complete = complete
         self.model = model or DEFAULT_MODEL
 
-    def classify(self, case):
-        response = self._complete(SYSTEM_PROMPT, render_prompt(case))
+    def classify(self, case, repair_note=None):
+        response = self._complete(SYSTEM_PROMPT, render_prompt(case, repair_note))
         result = parse_response(response)
         result["model"] = self.model
         result["rubric_version"] = RUBRIC_VERSION

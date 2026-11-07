@@ -104,43 +104,63 @@ def embed_texts_via_http(texts, url, model, batch_size=64, timeout=300):
     return _normalize_rows(np.vstack(batch_arrays))
 
 
-def add_embeddings(windows,
-                   text_field="filtered_text",
-                   model_name=None,
-                   batch_size=64,
-                   url=None):
-    """Attach an L2-normalized embedding to every window.
+def embed_texts(texts,
+                model_name=None,
+                batch_size=64,
+                url=None):
+    """Embed a list of strings, L2-normalized, one row per input.
 
-    If an embedding endpoint is configured (the `url` argument or the
-    QI_EMBEDDINGS_URL environment variable), embeddings are fetched over HTTP
-    and torch / sentence-transformers are never imported — that is what lets
-    this pipeline run on a CPU-only box using a GPU host's embedding server.
-    Otherwise the model runs locally through sentence-transformers.
+    Over HTTP when an endpoint is configured (the `url` argument or
+    QI_EMBEDDINGS_URL), in which case torch / sentence-transformers are never
+    imported — that is what lets this pipeline run on a CPU-only box using a GPU
+    host's embedding server. Otherwise the model runs locally.
     """
-    texts = [w[text_field] for w in windows]
-
     url = url or os.environ.get(EMBEDDINGS_URL_ENV)
 
     if url:
         model = model_name or os.environ.get(EMBEDDINGS_MODEL_ENV, DEFAULT_HTTP_MODEL)
-        print(f"Embedding via {url} (model {model})")
-        embeddings = embed_texts_via_http(texts, url, model, batch_size=batch_size)
-    else:
-        import torch
-        from sentence_transformers import SentenceTransformer
+        print(f"Embedding via {url} (model {model})", flush=True)
+        return embed_texts_via_http(texts, url, model, batch_size=batch_size)
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
+    import torch
+    from sentence_transformers import SentenceTransformer
 
-        model = SentenceTransformer(model_name or DEFAULT_LOCAL_MODEL, device=device)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
 
-        embeddings = model.encode(
+    model = SentenceTransformer(model_name or DEFAULT_LOCAL_MODEL, device=device)
+
+    return model.encode(
+        texts,
+        batch_size=batch_size,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+        normalize_embeddings=True,  # IMPORTANT
+    )
+
+
+def add_embeddings(windows,
+                   text_field="filtered_text",
+                   model_name=None,
+                   batch_size=64,
+                   url=None,
+                   cache=None):
+    """Attach an L2-normalized embedding to every window.
+
+    `cache` is anything with `.embed(texts, compute)` — see embeddings_cache —
+    which lets a corpus be embedded once instead of once per run.
+    """
+    texts = [w[text_field] for w in windows]
+
+    if cache is not None:
+        embeddings = cache.embed(
             texts,
-            batch_size=batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-            normalize_embeddings=True  # IMPORTANT
+            lambda missing: embed_texts(missing, model_name=model_name,
+                                        batch_size=batch_size, url=url),
         )
+    else:
+        embeddings = embed_texts(texts, model_name=model_name,
+                                 batch_size=batch_size, url=url)
 
     for window, emb in zip(windows, embeddings):
         window["embedding"] = emb
@@ -170,50 +190,8 @@ def find_embedding_matches(windows, index, embeddings, k=5):
     return matches
 
 # -------------------------------------------------
-# 3. ADVANCED MULTI-SIGNAL SCORING
+# 3. PAIR MAINTENANCE
 # -------------------------------------------------
-
-def jaccard_similarity(m1, m2):
-    return m1.jaccard(m2)
-
-
-def detect_speaker_signal(window):
-    """Very simple heuristic for speech detection."""
-    speech_markers = {"say", "said", "saith", "spake", "cry", "command"}
-    tokens = set(window["tokens"])
-    return len(tokens & speech_markers) > 0
-
-
-def score_match(window1, window2):
-    # 1. Embedding similarity (normalized)
-    emb_sim = float(np.dot(window1["embedding"], window2["embedding"]))
-    
-    # 2. MinHash similarity
-    minhash_sim = jaccard_similarity(window1["minhash"], window2["minhash"])
-    
-    # 3. Vocabulary overlap
-    vocab1 = set(window1["filtered_tokens"])
-    vocab2 = set(window2["filtered_tokens"])
-    vocab_overlap = (
-        len(vocab1 & vocab2) / len(vocab1 | vocab2)
-        if len(vocab1 | vocab2) > 0 else 0
-    )
-    
-    # 4. Speaker signal boost
-    speaker1 = detect_speaker_signal(window1)
-    speaker2 = detect_speaker_signal(window2)
-    speaker_boost = 0.05 if speaker1 != speaker2 else 0.0
-    
-    # 5. Combine signals
-    final_score = (
-        0.45 * emb_sim +
-        0.30 * minhash_sim +
-        0.20 * vocab_overlap +
-        speaker_boost
-    )
-    
-    return final_score
-
 
 def merge_duplicate_matches(matches):
     """Collapse candidate triples into one record per unordered pair.
@@ -249,13 +227,3 @@ def filter_nearby_matches(windows, matches, min_token_distance=200):
         filtered.append((i, j, source))
     
     return filtered
-
-
-def get_top_matches(windows, matches, top_n=50):
-    scored = []
-    for i, j, source in matches:
-        score = score_match(windows[i], windows[j])
-        scored.append((score, i, j, source))
-    
-    scored.sort(reverse=True)
-    return scored[:top_n]
