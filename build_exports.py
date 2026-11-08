@@ -44,7 +44,7 @@ CORPUS_PATHS = {
 CORPUS_COLORS = {
     "bom": "#1f6f8b",
     "ot": "#8c5a2b",
-    "nt": "#c07f3c",
+    "nt": "#c2185b",
     "dc": "#5b4b8a",
     "pgp": "#2f7d5b",
     "kjv": "#8c5a2b",
